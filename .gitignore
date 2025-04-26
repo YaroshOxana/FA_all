@@ -2,3 +2,5 @@ __pycache__/
 test.py
 saved_data/
 nlp4refactored.py
+.idea
+.DS_Store

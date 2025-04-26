@@ -40,6 +40,36 @@ import os
 import tkinter as tk
 from tkinter import filedialog
 
+# ───────── Globals for Python‐file analysis ─────────
+analysis_mode   = 'text'
+current_model   = {}    # token → Ngram
+current_tokens  = []    # ordered list of tokens
+current_windows = []    # list of window‐sizes used
+python_metrics  = {}    # tok → { dt, fa_vals, fit_vals, R, a, gamma, goodness }
+current_L       = 0
+current_w_s_val = 1
+# ─────────────────────────────────────────────────────
+
+def tokenize_code(data: str) -> List[str]:
+    """
+    Tokenize Python code into:
+     - identifiers
+     - integers
+     - multi‐char operators (==, !=, <=, >=, +=, etc.)
+     - paired punctuation tokens: (), [], {}, "", ''
+     - triple‐dot: ...
+     - any single‐char operator/punct
+    """
+    token_pattern = (
+        r"[A-Za-z_][A-Za-z0-9_]*"                     # identifiers
+        r"|\d+"                                       # integers
+        r"|==|!=|<=|>=|\+=|-=|\*=|/=|%=|//|<<|>>|->"   # two‐char ops
+        r"|\.\.\."                                    # triple dot
+        r"|\(\)|\[\]|\{\}|\"\"|\'\'"                  # paired punctuation
+        r"|[+\-*/%=&|^~<>!:;.,()\[\]{}]"               # single-char ops/punct
+    )
+    return re.findall(token_pattern, data)
+
 # Функція для очищення пам'яті
 def clear_memory(keep: List[str] = []):
     """
@@ -1992,36 +2022,150 @@ def save_batch_results(n_clicks, n_size, split, condition, definition, min_dist_
     except Exception as e:
         return html.Div(["Error saving batch results: {}".format(str(e))])
 
-@app.callback([Output("table", "data"), Output("chain", "figure"),
-               Output("box_tab", "style"),
-               Output("box_chain", "style"),
-               Output("alert", "children"),
-               Output("v", "children"),
-               Output("t", "children"),
-                Output('click-toast', 'is_open'),
-               ],
-              [Input("chain_button", "n_clicks"),
-               Input("dataframe", "active_tab")],
-              [State("f_min", "value"),
-               State("w_min", "value"),
-               State("w_s", "value"),
-               State("w_e", "value"),
-               State("w_max", "value"),
-               State("def", "value"),
-               State("min_dist_option", "value"),
-               State("overlap_mode", "value"),
-               State("n_size", "value"),
-               State("split", "value"),
-               State("condition", "value")
-               ])
-def update_table(n, dataframe, f_min, w_min, w_s, w_e, w_max, definition, min_dist_option, overlap_mode, n_size, split, condition):
+@app.callback(
+    [Output("table", "data"),
+     Output("chain", "figure"),
+     Output("box_tab", "style"),
+     Output("box_chain", "style"),
+     Output("alert", "children"),
+     Output("v", "children"),
+     Output("t", "children"),
+     Output("click-toast", "is_open")],
+    [Input("chain_button", "n_clicks"),
+     Input("dataframe", "active_tab")],
+    [State("file-selector", "value"),
+     State("f_min",        "value"),
+     State("w_min",        "value"),
+     State("w_s",          "value"),
+     State("w_e",          "value"),
+     State("w_max",        "value"),
+     State("def",          "value"),
+     State("min_dist_option","value"),
+     State("overlap_mode", "value"),
+     State("n_size",       "value"),
+     State("split",        "value"),
+     State("condition",    "value")]
+)
+def update_table(n, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
+                 definition, min_dist_option, overlap_mode,
+                 n_size, split, condition):
+    global model, L, V, df, new_ngram
+
+    # inside update_table(…):
+    global analysis_mode, current_model, current_tokens, current_windows, python_metrics, current_L, current_w_s_val
+
+    # —— handle .py files with full DFA + curve-fit + graph state ——
+    if filename and filename.lower().endswith('.py'):
+        code   = uploaded_files.get(filename, "")
+        tokens = tokenize_code(code)
+
+        # UI window params
+        w_s_val   = int(w_s)    if w_s   else 1
+        w_max_val = int(w_max)  if w_max else len(tokens)
+        w_e_val   = int(w_e)    if w_e   else w_s_val
+        if w_e_val == 0: w_e_val = 1
+        windows = list(range(w_s_val, w_max_val, w_e_val)) or [w_s_val]
+
+        # build model & compute metrics
+        L = len(tokens)
+        local_model = {}
+        pm = {}  # temp python_metrics
+        start = time()
+
+        for idx, tok in enumerate(tokens):
+            if tok not in local_model:
+                ng = Ngram()
+                ng.pos  = []
+                ng.bool = np.zeros(L, dtype=np.uint8)
+                local_model[tok] = ng
+            local_model[tok].pos.append(idx)
+            local_model[tok].bool[idx] = 1
+
+        for tok in local_model:
+            ng = local_model[tok]
+            dt = calculate_distance(
+                np.array(ng.pos, dtype=np.uint32),
+                L, condition, tok, int(min_dist_option)
+            )
+
+            fa_vals = []
+            for w in windows:
+                counts = make_windows(
+                    ng.bool, wi=w, l=L, wsh=w_s_val,
+                    overlap_mode=overlap_mode,
+                    min_window=(w_s_val if overlap_mode!='overlapping' else None),
+                    window_expansion=(w_e_val if overlap_mode!='overlapping' else None)
+                )
+                fa_vals.append(mse(counts))
+
+            try:
+                c, _      = curve_fit(fit, windows, fa_vals, method='lm', maxfev=5000)
+                a_val     = round(c[0], 8)
+                gamma_val = round(c[1], 8)
+                fit_vals  = [fit(w, *c) for w in windows]
+                goodness  = round(r2_score(fa_vals, fit_vals), 5)
+            except:
+                a_val = gamma_val = goodness = 0.0
+                fit_vals = [0]*len(windows)
+
+            R_val = round(R(dt), 8)
+
+            pm[tok] = {
+                'dt':       dt,
+                'fa_vals':  fa_vals,
+                'fit_vals': fit_vals,
+                'R':        R_val,
+                'a':        a_val,
+                'gamma':    gamma_val,
+                'goodness': goodness
+            }
+
+        execution_time = time() - start
+
+        # build DataTable records
+        records = []
+        for i, tok in enumerate(tokens):
+            # only first occurrence ⇒ unique tokens in insertion order
+            if tok in records:
+                continue
+            m = pm[tok]
+            records.append({
+                'rank':     len(records)+1,
+                'ngram':    tok,
+                'F':        len(local_model[tok].pos),
+                'R':        m['R'],
+                'a':        m['a'],
+                'gamma':    m['gamma'],
+                'goodness': m['goodness']
+            })
+
+        # stash globals for graphs
+        analysis_mode   = 'py'
+        current_model   = local_model
+        current_tokens  = tokens
+        current_windows = windows
+        python_metrics  = pm
+        current_L       = L
+        current_w_s_val = w_s_val
+
+        return (
+            records,
+            dash.no_update,          # keep your chart as-is
+            {"display": "inline"},   # show table
+            {"display": "none"},     # hide chain pane
+            dash.no_update,          # no alert
+            f"Vocabulary: {len(local_model)}",
+            f"Time: {execution_time:.4f} s",
+            False                    # close toast
+        )
+    # —— end .py branch ——
+
     """
     Оновлює таблицю та графік на основі вибраних параметрів.
     
     Використовує паралельну обробку для інтенсивних обчислень і оптимізоване управління пам'яттю
     для зменшення навантаження.
     """
-    global model, L, V, df, new_ngram
     
     # Очищуємо кеш для мемоізованих функцій
     if hasattr(prepare_data, 'clear_cache'):
@@ -2304,6 +2448,46 @@ clikced_ngram = None
 def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, ids, clicked_data, scale, fa_click,
                 graph_click, w_max, n,
                 definition):
+    # inside tab_content(…):
+    global analysis_mode, current_model, current_tokens, current_windows, python_metrics, current_L
+
+    # —— Python‐file override for both graphs ——
+    if analysis_mode == 'py':
+        # determine clicked token
+        tok = None
+        if active_cell and ids:
+            tok = current_tokens[active_cell['row']]
+        else:
+            tok = current_tokens[0] if current_tokens else None
+
+        # Distribution plot
+        fig_dist = go.Figure()
+        if tok and tok in current_model:
+            fig_dist.add_trace(go.Bar(
+                x=np.arange(current_L),
+                y=current_model[tok].bool,
+                name=tok
+            ))
+
+        # ∆F or α/R plot
+        fig_fa = go.Figure()
+        if active_tab1 == 'tab2':   # fluctuation tab
+            fa = python_metrics[tok]['fa_vals']
+            fit_vals = python_metrics[tok]['fit_vals']
+            fig_fa.add_trace(go.Scatter(x=current_windows, y=fa,      mode='markers', name="∆F"))
+            fig_fa.add_trace(go.Scatter(x=current_windows, y=fit_vals, name="fit"))
+        else:  # alpha/R tab
+            Rv = python_metrics[tok]['R']
+            Gv = python_metrics[tok]['gamma']
+            fig_fa.add_trace(go.Scatter(x=[Rv], y=[Gv], mode='markers', name=tok))
+
+        fig_fa.update_xaxes(type=scale)
+        fig_fa.update_yaxes(type=scale)
+        fig_fa.update_layout(hovermode="x unified")
+
+        return fig_dist, fig_fa
+    # —— end Python‐file override ——
+
     # Тільки для вкладки DataTable, оскільки MarkovChain було видалено
     if active_tab2 == "data_table":
         fig = go.Figure()
