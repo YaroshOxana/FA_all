@@ -1,3 +1,8 @@
+import os
+os.environ['NUMBA_THREADING_LAYER'] = 'tbb'
+from numba import config
+config.THREADING_LAYER = 'tbb'
+
 import numbers
 from typing import List, Tuple, Optional, Dict, Any, Union
 import gc  # Garbage Collector для кращого управління пам'яттю
@@ -20,6 +25,7 @@ import dash_core_components as dcc
 import dash_html_components as html
 import dash_table
 import dash_bootstrap_components as dbc
+from dash import callback_context, exceptions
 import plotly.graph_objs as go
 
 # Системні і допоміжні бібліотеки
@@ -50,23 +56,22 @@ current_L       = 0
 current_w_s_val = 1
 # ─────────────────────────────────────────────────────
 
+
 def tokenize_code(data: str) -> List[str]:
     """
     Tokenize Python code into:
      - identifiers
      - integers
-     - multi‐char operators (==, !=, <=, >=, +=, etc.)
-     - paired punctuation tokens: (), [], {}, "", ''
-     - triple‐dot: ...
-     - any single‐char operator/punct
+     - multi-char operators (==, !=, <=, >=, +=, etc.)
+     - triple‐dot (...)
+     - every single operator / punctuation character as its own token
     """
     token_pattern = (
-        r"[A-Za-z_][A-Za-z0-9_]*"                     # identifiers
-        r"|\d+"                                       # integers
-        r"|==|!=|<=|>=|\+=|-=|\*=|/=|%=|//|<<|>>|->"   # two‐char ops
-        r"|\.\.\."                                    # triple dot
-        r"|\(\)|\[\]|\{\}|\"\"|\'\'"                  # paired punctuation
-        r"|[+\-*/%=&|^~<>!:;.,()\[\]{}]"               # single-char ops/punct
+        r"[A-Za-z_][A-Za-z0-9_]*"        # identifiers
+        r"|\d+"                          # integers
+        r"|==|!=|<=|>=|\+=|-=|\*=|/=|%=|//|<<|>>|->"  # two-char ops
+        r"|\.{3}"                        # triple-dot
+        r"|[+\-*/%=&|^~<>!:;.,()\[\]{}\"']"           # every single punctuation/operator
     )
     return re.findall(token_pattern, data)
 
@@ -353,7 +358,7 @@ def calculate_distance(positions: np.ndarray, L: int, option: str, ngram: str, m
     return distances
 
 
-@njit(parallel=True)
+@njit
 def nbc(pos, L, min_dist=1):
     """
     Обчислює відстані без граничних умов.
@@ -379,7 +384,7 @@ def nbc(pos, L, min_dist=1):
     return dt
 
 
-@njit(parallel=True)
+@njit
 def pbc(pos, L, min_dist=1):
     """
     Обчислює відстані з періодичними граничними умовами.
@@ -414,7 +419,7 @@ def pbc(pos, L, min_dist=1):
     return dt
 
 
-@njit(parallel=True)
+@njit
 def obc(pos, L, min_dist=1):
     """
     Обчислює відстані зі звичайними граничними умовами.
@@ -802,10 +807,10 @@ layout1 = html.Div([
                             [
                                 # FILE SECTION
                                 html.Div([
-                                    html.H6("File Selection", 
-                                           className="text-primary text-center mb-2", 
+                                    html.H6("File Selection",
+                                           className="text-primary text-center mb-2",
                                            style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
-                                
+
                                     html.Label("Upload file:"),
                                     html.Div(
                                         [
@@ -841,14 +846,14 @@ layout1 = html.Div([
                                                         placeholder="Select a file to analyze",
                                                         style={"minWidth": "250px", "maxWidth": "100%", "whiteSpace": "nowrap", "textOverflow": "ellipsis"}
                                                     )
-                                                ], 
-                                                size="md", 
+                                                ],
+                                                size="md",
                                                 className="mb-3",
                                                 style={"marginBottom": "10px"}
                                             ),
                                         ]),
                                 ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee", "paddingBottom": "10px"}),
-                                
+
                                 # ANALYSIS PARAMETERS SECTION
                                 html.Div([
                                     html.H6("Analysis Parameters", 
@@ -995,10 +1000,11 @@ layout1 = html.Div([
                                            className="text-primary text-center mb-2", 
                                            style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
                                     
-                                    dbc.Button("Analyze", id="chain_button", color="primary", 
+                                    dbc.Button("Analyze natural text", id="chain_button", color="primary",
                                               className="w-100 mb-2", 
                                               style={"fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}, 
                                               disabled=analyze_visible),
+                                    dbc.Button("Analyze code", id="analyze_code", color="secondary", className="w-100 mb-2"),
                                     dbc.Button("Save data", id="save", color="danger", 
                                               className="w-100",
                                               style={"fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
@@ -2032,6 +2038,7 @@ def save_batch_results(n_clicks, n_size, split, condition, definition, min_dist_
      Output("t", "children"),
      Output("click-toast", "is_open")],
     [Input("chain_button", "n_clicks"),
+     Input("analyze_code", "n_clicks"),
      Input("dataframe", "active_tab")],
     [State("file-selector", "value"),
      State("f_min",        "value"),
@@ -2046,23 +2053,24 @@ def save_batch_results(n_clicks, n_size, split, condition, definition, min_dist_
      State("split",        "value"),
      State("condition",    "value")]
 )
-def update_table(n, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
+def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
                  definition, min_dist_option, overlap_mode,
                  n_size, split, condition):
-    global model, L, V, df, new_ngram
+    ctx = callback_context
+    if not ctx.triggered:
+        raise exceptions.PreventUpdate
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
-    # inside update_table(…):
-    global analysis_mode, current_model, current_tokens, current_windows, python_metrics, current_L, current_w_s_val
+    global model, L, V, df, new_ngram, analysis_mode, current_model, current_tokens, current_windows, python_metrics, current_L, current_w_s_val
 
-    # —— handle .py files with full DFA + curve-fit + graph state ——
-    if filename and filename.lower().endswith('.py'):
-        code   = uploaded_files.get(filename, "")
+    if triggered_id == "analyze_code":
+        code = uploaded_files.get(filename, "")
         tokens = tokenize_code(code)
 
         # UI window params
-        w_s_val   = int(w_s)    if w_s   else 1
-        w_max_val = int(w_max)  if w_max else len(tokens)
-        w_e_val   = int(w_e)    if w_e   else w_s_val
+        w_s_val = int(w_s) if w_s else 1
+        w_max_val = int(w_max) if w_max else len(tokens)
+        w_e_val = int(w_e) if w_e else w_s_val
         if w_e_val == 0: w_e_val = 1
         windows = list(range(w_s_val, w_max_val, w_e_val)) or [w_s_val]
 
@@ -2075,7 +2083,7 @@ def update_table(n, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
         for idx, tok in enumerate(tokens):
             if tok not in local_model:
                 ng = Ngram()
-                ng.pos  = []
+                ng.pos = []
                 ng.bool = np.zeros(L, dtype=np.uint8)
                 local_model[tok] = ng
             local_model[tok].pos.append(idx)
@@ -2093,30 +2101,30 @@ def update_table(n, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
                 counts = make_windows(
                     ng.bool, wi=w, l=L, wsh=w_s_val,
                     overlap_mode=overlap_mode,
-                    min_window=(w_s_val if overlap_mode!='overlapping' else None),
-                    window_expansion=(w_e_val if overlap_mode!='overlapping' else None)
+                    min_window=(w_s_val if overlap_mode != 'overlapping' else None),
+                    window_expansion=(w_e_val if overlap_mode != 'overlapping' else None)
                 )
                 fa_vals.append(mse(counts))
 
             try:
-                c, _      = curve_fit(fit, windows, fa_vals, method='lm', maxfev=5000)
-                a_val     = round(c[0], 8)
+                c, _ = curve_fit(fit, windows, fa_vals, method='lm', maxfev=5000)
+                a_val = round(c[0], 8)
                 gamma_val = round(c[1], 8)
-                fit_vals  = [fit(w, *c) for w in windows]
-                goodness  = round(r2_score(fa_vals, fit_vals), 5)
+                fit_vals = [fit(w, *c) for w in windows]
+                goodness = round(r2_score(fa_vals, fit_vals), 5)
             except:
                 a_val = gamma_val = goodness = 0.0
-                fit_vals = [0]*len(windows)
+                fit_vals = [0] * len(windows)
 
             R_val = round(R(dt), 8)
 
             pm[tok] = {
-                'dt':       dt,
-                'fa_vals':  fa_vals,
+                'dt': dt,
+                'fa_vals': fa_vals,
                 'fit_vals': fit_vals,
-                'R':        R_val,
-                'a':        a_val,
-                'gamma':    gamma_val,
+                'R': R_val,
+                'a': a_val,
+                'gamma': gamma_val,
                 'goodness': goodness
             }
 
@@ -2124,307 +2132,303 @@ def update_table(n, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
 
         # build DataTable records
         records = []
-        for i, tok in enumerate(tokens):
-            # only first occurrence ⇒ unique tokens in insertion order
-            if tok in records:
-                continue
+        for rank, tok in enumerate(local_model.keys(), start=1):
             m = pm[tok]
             records.append({
-                'rank':     len(records)+1,
-                'ngram':    tok,
-                'F':        len(local_model[tok].pos),
-                'R':        m['R'],
-                'a':        m['a'],
-                'gamma':    m['gamma'],
+                'rank': rank,
+                'ngram': tok,
+                'F': len(local_model[tok].pos),
+                'R': m['R'],
+                'a': m['a'],
+                'gamma': m['gamma'],
                 'goodness': m['goodness']
             })
 
         # stash globals for graphs
-        analysis_mode   = 'py'
-        current_model   = local_model
-        current_tokens  = tokens
+        analysis_mode = 'py'
+        current_model = local_model
+        current_tokens = tokens
         current_windows = windows
-        python_metrics  = pm
-        current_L       = L
+        python_metrics = pm
+        current_L = L
         current_w_s_val = w_s_val
 
         return (
             records,
-            dash.no_update,          # keep your chart as-is
-            {"display": "inline"},   # show table
-            {"display": "none"},     # hide chain pane
-            dash.no_update,          # no alert
+            dash.no_update,  # keep your chart as-is
+            {"display": "inline"},  # show table
+            {"display": "none"},  # hide chain pane
+            dash.no_update,  # no alert
             f"Vocabulary: {len(local_model)}",
             f"Time: {execution_time:.4f} s",
-            False                    # close toast
+            False  # close toast
         )
-    # —— end .py branch ——
+    elif triggered_id == "chain_button":
+        # Очищуємо кеш для мемоізованих функцій
+        if hasattr(prepare_data, 'clear_cache'):
+            prepare_data.clear_cache()
+        if hasattr(make_markov_chain, 'clear_cache'):
+            make_markov_chain.clear_cache()
 
-    """
-    Оновлює таблицю та графік на основі вибраних параметрів.
-    
-    Використовує паралельну обробку для інтенсивних обчислень і оптимізоване управління пам'яттю
-    для зменшення навантаження.
-    """
-    
-    # Очищуємо кеш для мемоізованих функцій
-    if hasattr(prepare_data, 'clear_cache'):
-        prepare_data.clear_cache()
-    if hasattr(make_markov_chain, 'clear_cache'):
-        make_markov_chain.clear_cache()
-    
-    # Викликаємо збирач сміття для звільнення пам'яті
-    clear_memory(keep=['data', 'uploaded_files', 'file_lengths'])
-    
-    if n is None or dataframe is None:
-        return (dash.no_update, dash.no_update, {"display": "none"}, {"display": "none"},
-                dash.no_update, dash.no_update, dash.no_update,
-                dash.no_update)
-                
-    # Вже нема вкладки MarkovChain, тому використовуємо тільки data_table
-    if definition == "dynamic":
-        start = time()
-        
-        # Додаємо перевірку на None для безпеки
-        w_s_val = int(w_s) if w_s is not None else 5
-        w_max_val = int(w_max) if w_max is not None else 100
-        w_e_val = int(w_e) if w_e is not None else 5
-        
-        # Запобігання ValueError: range() arg 3 must not be zero
-        if w_e_val == 0:
-            w_e_val = 5
-            print("Warning: Window expansion (w_e) was 0, set to default value 5")
-        
-        windows = list(range(w_s_val, w_max_val, w_e_val))
-        
-        # Створення нового n-граму та його обробка
-        new_ngram = newNgram(data, w_s_val, L)
-        
-        # Визначаємо функцію для паралельної обробки вікон
-        def process_window(w):
-            if overlap_mode == "overlapping":
-                return new_ngram.func(w)
+        # Викликаємо збирач сміття для звільнення пам'яті
+        clear_memory(keep=['data', 'uploaded_files', 'file_lengths'])
+
+        if chain_clicks is None or dataframe is None:
+            return (dash.no_update, dash.no_update, {"display": "none"}, {"display": "none"},
+                    dash.no_update, dash.no_update, dash.no_update,
+                    dash.no_update)
+
+        # Вже нема вкладки MarkovChain, тому використовуємо тільки data_table
+        if definition == "dynamic":
+            start = time()
+
+            # Додаємо перевірку на None для безпеки
+            w_s_val = int(w_s) if w_s is not None else 5
+            w_max_val = int(w_max) if w_max is not None else 100
+            w_e_val = int(w_e) if w_e is not None else 5
+
+            # Запобігання ValueError: range() arg 3 must not be zero
+            if w_e_val == 0:
+                w_e_val = 5
+                print("Warning: Window expansion (w_e) was 0, set to default value 5")
+
+            windows = list(range(w_s_val, w_max_val, w_e_val))
+
+            # Створення нового n-граму та його обробка
+            new_ngram = newNgram(data, w_s_val, L)
+
+            # Визначаємо функцію для паралельної обробки вікон
+            def process_window(w):
+                if overlap_mode == "overlapping":
+                    return new_ngram.func(w)
+                else:
+                    return new_ngram.func(w, overlap_mode=overlap_mode, min_window=w_s_val, window_expansion=w_e_val)
+
+            # Паралельна обробка вікон (якщо їх достатньо багато)
+            if len(windows) > 4:  # Паралелізуємо лише якщо є достатня кількість вікон
+                with ThreadPoolExecutor(max_workers=min(4, len(windows))) as executor:
+                    list(executor.map(process_window, windows))
             else:
-                return new_ngram.func(w, overlap_mode=overlap_mode, min_window=w_s_val, window_expansion=w_e_val)
-        
-        # Паралельна обробка вікон (якщо їх достатньо багато)
-        if len(windows) > 4:  # Паралелізуємо лише якщо є достатня кількість вікон
-            with ThreadPoolExecutor(max_workers=min(4, len(windows))) as executor:
-                list(executor.map(process_window, windows))
-        else:
-            # Послідовна обробка для малої кількості вікон
-            for w in windows:
-                process_window(w)
-        
-        # Оптимізоване створення списків для елементів та їх позицій
-        temp_v = []
-        temp_pos = []
-        unique_items = set()  # Використовуємо множину для швидшого пошуку
-        
-        for i, ngram in enumerate(data):
-            if ngram not in unique_items:
-                unique_items.add(ngram)
-                temp_v.append(ngram)
-                temp_pos.append(i)
-        
-        # Використовуємо numpy масиви для ефективнішої обробки
-        temp_pos_array = np.array(temp_pos, dtype=np.uint32)
-        # Використовуємо перший елемент або "new_ngram" для розрахунку відстаней
-        ngram_for_calc = temp_v[0] if temp_v else "new_ngram"
-        new_ngram.dt = calculate_distance(temp_pos_array, L, condition, ngram_for_calc, min_dist_option)
-        new_ngram.R = round(R(new_ngram.dt), 8)
-        
-        # Обробка помилок при підгонці кривої
-        try:
-            dfa_keys = list(new_ngram.dfa.keys())
-            dfa_values = list(new_ngram.dfa.values())
-            
-            # Перевірка наявності достатньої кількості даних для підбору кривої
-            if len(dfa_keys) < 2 or len(dfa_values) < 2:
-                print("Недостатньо даних для підбору кривої")
+                # Послідовна обробка для малої кількості вікон
+                for w in windows:
+                    process_window(w)
+
+            # Оптимізоване створення списків для елементів та їх позицій
+            temp_v = []
+            temp_pos = []
+            unique_items = set()  # Використовуємо множину для швидшого пошуку
+
+            for i, ngram in enumerate(data):
+                if ngram not in unique_items:
+                    unique_items.add(ngram)
+                    temp_v.append(ngram)
+                    temp_pos.append(i)
+
+            # Використовуємо numpy масиви для ефективнішої обробки
+            temp_pos_array = np.array(temp_pos, dtype=np.uint32)
+            # Використовуємо перший елемент або "new_ngram" для розрахунку відстаней
+            ngram_for_calc = temp_v[0] if temp_v else "new_ngram"
+            new_ngram.dt = calculate_distance(temp_pos_array, L, condition, ngram_for_calc, min_dist_option)
+            new_ngram.R = round(R(new_ngram.dt), 8)
+
+            # Обробка помилок при підгонці кривої
+            try:
+                dfa_keys = list(new_ngram.dfa.keys())
+                dfa_values = list(new_ngram.dfa.values())
+
+                # Перевірка наявності достатньої кількості даних для підбору кривої
+                if len(dfa_keys) < 2 or len(dfa_values) < 2:
+                    print("Недостатньо даних для підбору кривої")
+                    new_ngram.a = 1.0
+                    new_ngram.gamma = 0.5
+                    new_ngram.temp_dfa = [1.0] * (len(dfa_keys) if dfa_keys else 1)
+                    new_ngram.goodness = 0.0
+                else:
+                    c, _ = curve_fit(fit, dfa_keys, dfa_values, method='lm', maxfev=5000)
+                    new_ngram.a = round(c[0], 8)
+                    new_ngram.gamma = round(c[1], 8)
+
+                    # Оптимізуємо обчислення temp_dfa
+                    new_ngram.temp_dfa = [fit(w, new_ngram.a, new_ngram.gamma) for w in dfa_keys]
+                    new_ngram.goodness = round(r2_score(dfa_values, new_ngram.temp_dfa), 8)
+
+                # Звільняємо пам'ять від тимчасових змінних
+                del dfa_keys, dfa_values
+            except Exception as e:
+                print(f"Помилка при підборі кривої: {e}")
                 new_ngram.a = 1.0
                 new_ngram.gamma = 0.5
-                new_ngram.temp_dfa = [1.0] * (len(dfa_keys) if dfa_keys else 1)
+                new_ngram.temp_dfa = []
                 new_ngram.goodness = 0.0
-            else:
-                c, _ = curve_fit(fit, dfa_keys, dfa_values, method='lm', maxfev=5000)
-                new_ngram.a = round(c[0], 8)
-                new_ngram.gamma = round(c[1], 8)
-                
-                # Оптимізуємо обчислення temp_dfa
-                new_ngram.temp_dfa = [fit(w, new_ngram.a, new_ngram.gamma) for w in dfa_keys]
-                new_ngram.goodness = round(r2_score(dfa_values, new_ngram.temp_dfa), 8)
-            
+
+            # Створення DataFrame для представлення результатів
+            df = pd.DataFrame({
+                'rank': [1],
+                'ngram': ['new_ngram'],
+                'F': [len(temp_pos)],
+                'R': [new_ngram.R],
+                'a': [new_ngram.a],
+                'gamma': [new_ngram.gamma],
+                'goodness': [new_ngram.goodness]
+            })
+
+            V = len(temp_v)
+
+            end_time = time()
+            execution_time = end_time - start
+
+            # Підготовка даних для відображення
+            df_table = df.to_dict("records")
+
+            # Додаємо інформацію про розмір словника і час виконання
+            vocab_info = f"Vocabulary: {V}"
+            time_info = f"Time: {execution_time:.4f} s"
+
             # Звільняємо пам'ять від тимчасових змінних
-            del dfa_keys, dfa_values
-        except Exception as e:
-            print(f"Помилка при підборі кривої: {e}")
-            new_ngram.a = 1.0
-            new_ngram.gamma = 0.5
-            new_ngram.temp_dfa = []
-            new_ngram.goodness = 0.0
-        
-        # Створення DataFrame для представлення результатів
-        df = pd.DataFrame({
-            'rank': [1],
-            'ngram': ['new_ngram'],
-            'F': [len(temp_pos)],
-            'R': [new_ngram.R],
-            'a': [new_ngram.a],
-            'gamma': [new_ngram.gamma],
-            'goodness': [new_ngram.goodness]
-        })
-        
-        V = len(temp_v)
-        
-        end_time = time()
-        execution_time = end_time - start
-        
-        # Підготовка даних для відображення
-        df_table = df.to_dict("records")
-        
-        # Додаємо інформацію про розмір словника і час виконання
-        vocab_info = f"Vocabulary: {V}"
-        time_info = f"Time: {execution_time:.4f} s"
-        
-        # Звільняємо пам'ять від тимчасових змінних
-        del temp_v, temp_pos, unique_items, temp_pos_array
-        gc.collect()
-        
-        return (df_table, dash.no_update, {"display": "inline"}, {"display": "none"},
-                dash.no_update, vocab_info, time_info, False)
-    else:
-        # Markov Chain обробка
-        start = time()
-        
-        # Створення ланцюга Маркова та DataFrame
-        make_markov_chain(data, order=n_size)
-        df = make_dataframe(model, f_min)
-        
-        # Перевірка безпеки для None значень
-        w_s_val = int(w_s) if w_s is not None else 5
-        w_max_val = int(w_max) if w_max is not None else 100
-        w_e_val = int(w_e) if w_e is not None else 5
-        
-        # Запобігання ValueError: range() arg 3 must not be zero
-        if w_e_val == 0:
-            w_e_val = 5
-            print("Warning: Window expansion (w_e) was 0, set to default value 5")
-        
-        windows = list(range(w_s_val, w_max_val, w_e_val))
-        
-        # Функція для обробки окремого n-грама
-        def process_ngram(ngram_data):
-            ngram, index = ngram_data
-            
-            # Розрахунок відстаней
-            dt = calculate_distance(np.array(model[ngram].pos, dtype=np.uint32), L, condition, ngram, min_dist_option)
-            model[ngram].dt = dt
-            
-            # Обробка вікон для цього n-грама
-            for wind in windows:
-                if overlap_mode == "overlapping":
-                    model[ngram].counts[wind] = make_windows(model[ngram].bool, wi=wind, l=L, wsh=w_s_val, overlap_mode=overlap_mode)
-                else:
-                    model[ngram].counts[wind] = make_windows(model[ngram].bool, wi=wind, l=L, wsh=w_s_val, 
-                                                            overlap_mode=overlap_mode, min_window=w_s_val, window_expansion=w_e_val)
-                
-                model[ngram].fa[wind] = mse(model[ngram].counts[wind])
-            
-            # Підгонка кривої та обробка помилок
-            try:
-                ff = [*model[ngram].fa.values()]
-                c, _ = curve_fit(fit, windows, ff, method='lm', maxfev=5000)
-                
-                a_val = c[0]
-                gamma_val = c[1]
-                temp_fa = [fit(w_val, a_val, gamma_val) for w_val in windows]
-                
-                # Зберігаємо результати в моделі
-                model[ngram].a = a_val
-                model[ngram].gamma = gamma_val
-                model[ngram].temp_fa = temp_fa
-                
-                r_val = round(R(dt), 8)
-                model[ngram].R = r_val
-                
-                return {
-                    'ngram': ngram,
-                    'a': round(a_val, 8),
-                    'gamma': round(gamma_val, 8),
-                    'error': round(r2_score(ff, temp_fa), 5),
-                    'R': r_val
-                }
-            except Exception as e:
-                print(f"Error in curve fitting for {ngram}: {e}")
-                model[ngram].a = 0
-                model[ngram].gamma = 0
-                model[ngram].temp_fa = [0] * len(windows)
-                r_val = round(R(dt), 8)
-                model[ngram].R = r_val
-                
-                return {
-                    'ngram': ngram,
-                    'a': 0,
-                    'gamma': 0,
-                    'error': 0,
-                    'R': r_val
-                }
-        
-        # Підготовка даних для паралельної обробки
-        ngram_items = [(ngram, i) for i, ngram in enumerate(df["ngram"])]
-        
-        # Визначаємо кількість робітників на основі кількості n-грамів
-        max_workers = min(4, len(ngram_items))
-        
-        # Паралельна обробка для великої кількості n-грамів, інакше послідовна
-        results = []
-        if len(ngram_items) >= 4:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                results = list(executor.map(process_ngram, ngram_items))
+            del temp_v, temp_pos, unique_items, temp_pos_array
+            gc.collect()
+
+            return (df_table, dash.no_update, {"display": "inline"}, {"display": "none"},
+                    dash.no_update, vocab_info, time_info, False)
         else:
-            results = [process_ngram(item) for item in ngram_items]
-        
-        # Витягуємо результати
-        temp_a = [result['a'] for result in results]
-        temp_gamma = [result['gamma'] for result in results]
-        temp_error = [result['error'] for result in results]
-        temp_R = [result['R'] for result in results]
-        
-        # Обробка n-грамів для відображення
-        if n_size > 1:
-            temp_ngram = []
-            for ng in df['ngram']:
-                if isinstance(ng, tuple):
-                    temp_ngram.append(" ".join(ng))
-                else:
-                    temp_ngram.append(ng)
-            df["ngram"] = temp_ngram
-        
-        # Оновлення DataFrame результатами
-        df['R'] = temp_R
-        df['gamma'] = temp_gamma
-        df['a'] = temp_a
-        df['goodness'] = temp_error
-        df = df.sort_values(by="F", ascending=False)
-        df['rank'] = range(1, len(temp_R) + 1)
-        
-        end_time = time()
-        execution_time = end_time - start
-        
-        # Підготовка даних для відображення
-        df_table = df.to_dict("records")
-        
-        # Додаємо інформацію про розмір словника і час виконання
-        vocab_info = f"Vocabulary: {V}"
-        time_info = f"Time: {execution_time:.4f} s"
-        
-        # Звільняємо пам'ять від тимчасових змінних
-        del temp_gamma, temp_R, temp_error, temp_a, results, ngram_items
-        gc.collect()
-        
-        return (df_table, dash.no_update, {"display": "inline"}, {"display": "none"},
-                dash.no_update, vocab_info, time_info, False)
+            # Markov Chain обробка
+            start = time()
+
+            # Створення ланцюга Маркова та DataFrame
+            make_markov_chain(data, order=n_size)
+            df = make_dataframe(model, f_min)
+
+            # Перевірка безпеки для None значень
+            w_s_val = int(w_s) if w_s is not None else 5
+            w_max_val = int(w_max) if w_max is not None else 100
+            w_e_val = int(w_e) if w_e is not None else 5
+
+            # Запобігання ValueError: range() arg 3 must not be zero
+            if w_e_val == 0:
+                w_e_val = 5
+                print("Warning: Window expansion (w_e) was 0, set to default value 5")
+
+            windows = list(range(w_s_val, w_max_val, w_e_val))
+
+            # Функція для обробки окремого n-грама
+            def process_ngram(ngram_data):
+                ngram, index = ngram_data
+
+                # Розрахунок відстаней
+                dt = calculate_distance(np.array(model[ngram].pos, dtype=np.uint32), L, condition, ngram,
+                                        min_dist_option)
+                model[ngram].dt = dt
+
+                # Обробка вікон для цього n-грама
+                for wind in windows:
+                    if overlap_mode == "overlapping":
+                        model[ngram].counts[wind] = make_windows(model[ngram].bool, wi=wind, l=L, wsh=w_s_val,
+                                                                 overlap_mode=overlap_mode)
+                    else:
+                        model[ngram].counts[wind] = make_windows(model[ngram].bool, wi=wind, l=L, wsh=w_s_val,
+                                                                 overlap_mode=overlap_mode, min_window=w_s_val,
+                                                                 window_expansion=w_e_val)
+
+                    model[ngram].fa[wind] = mse(model[ngram].counts[wind])
+
+                # Підгонка кривої та обробка помилок
+                try:
+                    ff = [*model[ngram].fa.values()]
+                    c, _ = curve_fit(fit, windows, ff, method='lm', maxfev=5000)
+
+                    a_val = c[0]
+                    gamma_val = c[1]
+                    temp_fa = [fit(w_val, a_val, gamma_val) for w_val in windows]
+
+                    # Зберігаємо результати в моделі
+                    model[ngram].a = a_val
+                    model[ngram].gamma = gamma_val
+                    model[ngram].temp_fa = temp_fa
+
+                    r_val = round(R(dt), 8)
+                    model[ngram].R = r_val
+
+                    return {
+                        'ngram': ngram,
+                        'a': round(a_val, 8),
+                        'gamma': round(gamma_val, 8),
+                        'error': round(r2_score(ff, temp_fa), 5),
+                        'R': r_val
+                    }
+                except Exception as e:
+                    print(f"Error in curve fitting for {ngram}: {e}")
+                    model[ngram].a = 0
+                    model[ngram].gamma = 0
+                    model[ngram].temp_fa = [0] * len(windows)
+                    r_val = round(R(dt), 8)
+                    model[ngram].R = r_val
+
+                    return {
+                        'ngram': ngram,
+                        'a': 0,
+                        'gamma': 0,
+                        'error': 0,
+                        'R': r_val
+                    }
+
+            # Підготовка даних для паралельної обробки
+            ngram_items = [(ngram, i) for i, ngram in enumerate(df["ngram"])]
+
+            # Визначаємо кількість робітників на основі кількості n-грамів
+            max_workers = min(4, len(ngram_items))
+
+            # Паралельна обробка для великої кількості n-грамів, інакше послідовна
+            results = []
+            if len(ngram_items) >= 4:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    results = list(executor.map(process_ngram, ngram_items))
+            else:
+                results = [process_ngram(item) for item in ngram_items]
+
+            # Витягуємо результати
+            temp_a = [result['a'] for result in results]
+            temp_gamma = [result['gamma'] for result in results]
+            temp_error = [result['error'] for result in results]
+            temp_R = [result['R'] for result in results]
+
+            # Обробка n-грамів для відображення
+            if n_size > 1:
+                temp_ngram = []
+                for ng in df['ngram']:
+                    if isinstance(ng, tuple):
+                        temp_ngram.append(" ".join(ng))
+                    else:
+                        temp_ngram.append(ng)
+                df["ngram"] = temp_ngram
+
+            # Оновлення DataFrame результатами
+            df['R'] = temp_R
+            df['gamma'] = temp_gamma
+            df['a'] = temp_a
+            df['goodness'] = temp_error
+            df = df.sort_values(by="F", ascending=False)
+            df['rank'] = range(1, len(temp_R) + 1)
+
+            end_time = time()
+            execution_time = end_time - start
+
+            # Підготовка даних для відображення
+            df_table = df.to_dict("records")
+
+            # Додаємо інформацію про розмір словника і час виконання
+            vocab_info = f"Vocabulary: {V}"
+            time_info = f"Time: {execution_time:.4f} s"
+
+            # Звільняємо пам'ять від тимчасових змінних
+            del temp_gamma, temp_R, temp_error, temp_a, results, ngram_items
+            gc.collect()
+
+            return (df_table, dash.no_update, {"display": "inline"}, {"display": "none"},
+                    dash.no_update, vocab_info, time_info, False)
+    else:
+        raise exceptions.PreventUpdate
+
+
 
 
 clikced_ngram = None
