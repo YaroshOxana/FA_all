@@ -67,11 +67,11 @@ def tokenize_code(data: str) -> List[str]:
      - every single operator / punctuation character as its own token
     """
     token_pattern = (
-        r"[A-Za-z_][A-Za-z0-9_]*"        # identifiers
-        r"|\d+"                          # integers
-        r"|==|!=|<=|>=|\+=|-=|\*=|/=|%=|//|<<|>>|->"  # two-char ops
-        r"|\.{3}"                        # triple-dot
-        r"|[+\-*/%=&|^~<>!:;.,()\[\]{}\"']"           # every single punctuation/operator
+        r"[A-Za-z_][A-Za-z0-9_]*"  # identifiers
+        r"|\d+"  # integers
+        r"|==|!=|<=|>=|\+=|-=|\*=|/=|%=|//|<<|>>|->"  # multi-char ops
+        r"|\.{3}"  # triple-dot
+        r"|[+\-*/%=&|^~<>!:#;.,()\[\]{}\"']"
     )
     return re.findall(token_pattern, data)
 
@@ -1060,6 +1060,12 @@ layout1 = html.Div([
                                     dbc.Button("Process All Files", id="batch_process", color="success", 
                                               className="w-100", 
                                               style={'marginBottom': '10px', "fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
+                                    dbc.Button(
+                                        "Process All Code Files",
+                                        id="batch_process_code",
+                                        color="secondary",
+                                        className="w-100 mb-2"
+                                    ),
                                     dbc.Button("Save Batch Results", id="save_batch", color="primary",
                                               className="w-100",
                                               style={'marginBottom': '10px', "fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
@@ -1429,9 +1435,38 @@ def update_upload_status(contents, filenames, n_size, split_mode):
         try:
             content_type, content_string = content.split(',')
             decoded = base64.b64decode(content_string)
-            
+
             try:
-                file_content = decoded.decode('utf-8')
+                raw = decoded  # still bytes
+
+                if filename.lower().endswith('.py'):
+                    pieces = []
+                    # A very simple regex that finds #…\n comments and triple-quoted docstrings
+                    token_re = re.compile(
+                        rb"""
+                        ( \# [^\n]*         )   # 1: single-line comment
+                      | (\"\"\".*?\"\"\"   )   # 2: triple-double-quoted string
+                      | (\'\'\'.*?\'\'\'   )   # 3: triple-single-quoted string
+                      """,
+                        re.MULTILINE | re.DOTALL | re.VERBOSE,
+                    )
+                    last = 0
+                    for m in token_re.finditer(raw):
+                        # decode the code between last and start of this match as CP1251
+                        if m.start() > last:
+                            pieces.append(raw[last:m.start()].decode('cp1251', errors='replace'))
+                        # decode the matched comment/docstring as UTF-8
+                        pieces.append(raw[m.start():m.end()].decode('utf-8', errors='replace'))
+                        last = m.end()
+                    # any trailing code
+                    if last < len(raw):
+                        pieces.append(raw[last:].decode('cp1251', errors='replace'))
+
+                    file_content = "".join(pieces)
+                else:
+                    # natural-language files are all UTF-8
+                    file_content = raw.decode('utf-8', errors='replace')
+
                 uploaded_files[filename] = file_content
                 file_lengths[filename] = {}
                 
@@ -1590,303 +1625,267 @@ new_ngram = None
 
 
 # Add callback for batch processing
+from dash import callback_context, exceptions
+
 @app.callback(
     [Output("batch_table", "data"),
      Output("batch_results_container", "style")],
-    [Input("batch_process", "n_clicks")],
-    [State("fmin1", "value"),
-     State("fmin2", "value"),
-     State("split", "value"),
-     State("n_size", "value"),
-     State("condition", "value"),
-     State("def", "value"),
-     State("min_dist_option", "value"),
-     State("overlap_mode", "value"),
-     State("w_min", "value"),
-     State("w_s", "value"),
-     State("w_e", "value"),
-     State("w_max", "value"),
-     State("batch_window_mode", "value")]
+    [
+        Input("batch_process",      "n_clicks"),
+        Input("batch_process_code", "n_clicks"),
+    ],
+    [
+        State("fmin1",            "value"),
+        State("fmin2",            "value"),
+        State("split",            "value"),
+        State("n_size",           "value"),
+        State("condition",        "value"),
+        State("def",              "value"),
+        State("min_dist_option",  "value"),
+        State("overlap_mode",     "value"),
+        State("w_min",            "value"),
+        State("w_s",              "value"),
+        State("w_e",              "value"),
+        State("w_max",            "value"),
+        State("batch_window_mode","value"),
+    ]
 )
-def process_all_files(n_clicks, fmin1, fmin2, split, n_size, condition, definition, min_dist_option, 
+def process_all_files(n_clicks_text, n_clicks_code,
+                      fmin1, fmin2, split, n_size, condition, definition, min_dist_option,
                       overlap_mode, w_min, w_s, w_e, w_max, batch_window_mode):
-    global batch_results, uploaded_files, file_lengths
-    
-    if n_clicks is None or not uploaded_files:
+    ctx = callback_context
+    if not ctx.triggered:
+        raise exceptions.PreventUpdate
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
+    # nothing to do if no uploads
+    if not uploaded_files:
         return [], {"display": "none"}
-    
-    # Find Lmin and Lmax for the current split method
-    lengths = [file_lengths[filename][split] for filename in list(uploaded_files.keys())]
+
+    # filter files based on which button was clicked
+    if triggered_id == "batch_process_code":
+        # only .py files
+        file_list = [
+            (fn, txt) for fn, txt in uploaded_files.items()
+            if fn.lower().endswith(".py")
+        ]
+    else:
+        # only non-.py files
+        file_list = [
+            (fn, txt) for fn, txt in uploaded_files.items()
+            if not fn.lower().endswith(".py")
+        ]
+
+    if not file_list:
+        return [], {"display": "none"}
+
+    # compute global min/max lengths for interpolation
+    lengths = [file_lengths[fn][split] for fn, _ in file_list]
     if not lengths:
         return [], {"display": "none"}
-        
-    lmin = min(lengths)
-    lmax = max(lengths)
-    
-    # Initialize batch results list
+    lmin, lmax = min(lengths), max(lengths)
+
     batch_results = []
-    
-    # Process each file sequentially and clear memory after each
-    file_list = list(uploaded_files.items())
+
+    # iterate over filtered files
     for idx, (filename, file_content) in enumerate(file_list, 1):
-        # Force garbage collection before starting new file
         gc.collect()
-        
-        # Calculate F_min based on file length
+
+        # interpolate F_min
         file_length = file_lengths[filename][split]
         if lmin == lmax:
-            f_min = fmin1  # If all files are the same length
+            f_min = fmin1
         else:
-            # Linear interpolation between fmin1 and fmin2
             f_min = fmin1 + (fmin2 - fmin1) * (file_length - lmin) / (lmax - lmin)
-            f_min = round(f_min)  # Round to nearest integer
-        
-        # Process the file
+            f_min = round(f_min)
+
         start_time = time()
-        
-        # Initialize all variables locally to avoid memory leaks
-        data = None
-        local_model = {}
-        
-        # Process data based on definition mode
+
+        # prepare data
         if definition == "dynamic":
             data = prepare_data(file_content, n_size, split)
         else:
             if split == "letter":
-                file_text = re.sub(r'	', '', file_content)
-                processed_data = remove_punctuation(file_text)
+                txt = re.sub(r'\t', '', file_content)
+                proc = remove_punctuation(txt)
                 temp = []
-                current_number = ""
-                
-                for char in processed_data:
-                    if char.isspace() or char == '\n' or char == '\ufeff':
-                        if current_number:
-                            temp.append(current_number)
-                            current_number = ""
+                cur = ""
+                for ch in proc:
+                    if ch.isspace() or ch == "\ufeff":
+                        if cur:
+                            temp.append(cur)
+                            cur = ""
                         continue
-                    if char.isdigit() or char.isalpha():
-                        temp.append(char)
-                
+                    cur += ch
+                if cur:
+                    temp.append(cur)
                 data = temp
-                # Free memory immediately
-                del processed_data
-                del temp
-                del file_text
+                del txt, proc, temp, cur
                 gc.collect()
+
             elif split == "symbol":
-                # Optimize processing
-                clean_text = re.sub(r'	', '', file_content)
-                clean_text = re.sub(r'\n+', '\n', clean_text)
-                clean_text = re.sub(r'\n\s\s', '\n', clean_text)
-                clean_text = re.sub(r'﻿', '', clean_text)
+                clean = re.sub(r'\t', '', file_content)
+                clean = re.sub(r'\n+', '\n', clean)
+                clean = re.sub(r'\n\s\s', '\n', clean)
+                clean = re.sub(r'﻿', '', clean)
                 temp = []
-                for i in clean_text:
-                    if i == " " or i == "\n" or i == "\ufeff":
+                for ch in clean:
+                    if ch in [" ", "\n", "\ufeff"]:
                         temp.append("space")
-                    elif i == '﻿' or is_valid_letter(i):
+                    elif is_valid_letter(ch):
                         continue
                     else:
-                        temp.append(i.lower())
+                        temp.append(ch.lower())
                 data = temp
-                del temp
-                del clean_text
+                del clean, temp
                 gc.collect()
+
             elif split == "word":
-                file_text = re.sub(r'\n+', '\n', file_content)
-                file_text = re.sub(r'\n\s\s', '\n', file_text)
-                file_text = re.sub(r'﻿', '', file_text)
-                file_text = re.sub(r'--', ' -', file_text)
-                processor = NgrammProcessor()
-                processor.preprocess(file_text)
-                data = processor.get_words()
-                del processor
-                del file_text
+                txt = re.sub(r'\n+', '\n', file_content)
+                txt = re.sub(r'\n\s\s', '\n', txt)
+                txt = re.sub(r'﻿', '', txt)
+                txt = re.sub(r'--', ' -', txt)
+                proc = NgrammProcessor()
+                proc.preprocess(txt)
+                data = proc.get_words()
+                del txt, proc
                 gc.collect()
 
         L = len(data)
-        
-        # Calculate window parameters based on batch settings
+
+        # window params
         if batch_window_mode == "ui":
-            # Use the values from the UI
-            wm_val = int(w_max) if w_max is not None else int(L / 20)
-            w_val = int(w_s) if w_s is not None else int(wm_val / 10)
-            wh_val = int(w_s) if w_s is not None else w_val
-            we_val = int(w_e) if w_e is not None else w_val
-        else:  # auto
-            # Calculate based on file length
+            wm_val = int(w_max) if w_max else int(L/20)
+            w_val  = int(w_s)   if w_s   else int(wm_val/10)
+            wh_val = int(w_s)   if w_s   else w_val
+            we_val = int(w_e)   if w_e   else w_val
+        else:
             if definition == "dynamic":
-                wm_val = int(L / 10)
-                w_val = int(wm_val / 10)
+                wm_val = int(L/10); w_val = int(wm_val/10)
             else:
-                wm_val = int(L / 20)
-                w_val = int(wm_val / 20)
-            wh_val = w_val
-            we_val = w_val
-            
-        # Ensure we have valid non-zero values
+                wm_val = int(L/20); w_val = int(wm_val/20)
+            wh_val = w_val; we_val = w_val
+
         wm_val = max(10, wm_val)
-        w_val = max(5, w_val)
+        w_val  = max(5, w_val)
         wh_val = max(1, wh_val)
         we_val = max(1, we_val)
-        
-        # Make Markov chain (use local variables)
+
+        # build local model
+        local_model = {}
         for i in range(L - n_size + 1):
             if i + n_size <= len(data):
-                if n_size == 1:
-                    ngram = data[i]
-                else:
-                    ngram = tuple(data[i:i + n_size])
-                
-                if ngram not in local_model:
-                    local_model[ngram] = Ngram()
-                    local_model[ngram].pos = []
-                
-                local_model[ngram].pos.append(i)
-        
-        # Build a vocabulary count for statistics
+                ng = data[i] if n_size == 1 else tuple(data[i:i+n_size])
+                if ng not in local_model:
+                    local_model[ng] = Ngram(); local_model[ng].pos = []
+                local_model[ng].pos.append(i)
+
         V = len(local_model)
-        
-        # Make DataFrame locally instead of using global function to save memory
-        filtered_data = list(filter(lambda x: len(local_model[x].pos) >= f_min, local_model))
-        
-        data_df = {"ngram": [], "F": np.empty(len(filtered_data), dtype=np.int32)}
-        for i, ngram in enumerate(filtered_data):
-            data_df["ngram"].append(ngram)
-            data_df["F"][i] = len(local_model[ngram].pos)
-        
+
+        # filter by f_min
+        filtered = [ng for ng in local_model if len(local_model[ng].pos) >= f_min]
+        data_df = {"ngram": [], "F": np.empty(len(filtered), dtype=np.int32)}
+        for j, ng in enumerate(filtered):
+            data_df["ngram"].append(ng)
+            data_df["F"][j] = len(local_model[ng].pos)
         current_df = pd.DataFrame(data=data_df)
-        
-        # Process positions and calculate parameters
-        temp_gamma = []
-        temp_R = []
-        temp_error = []
-        temp_a = []
-        
+
+        # compute metrics
         windows = list(range(w_val, wm_val, we_val))
-        
-        # Process each ngram
-        for i, row in current_df.iterrows():
-            ngram = row['ngram']
-            
-            # Generate boolean array for this ngram
-            local_model[ngram].bool = np.zeros(L, dtype=np.int8)
-            for pos in local_model[ngram].pos:
-                local_model[ngram].bool[pos] = 1
-            
-            # Calculate distances
-            min_dist_int = int(min_dist_option) if isinstance(min_dist_option, (str, float)) else min_dist_option
-            local_model[ngram].dt = calculate_distance(np.array(local_model[ngram].pos, dtype=np.uint32), L, condition, ngram, min_dist_int)
-            
-            # Process windows
-            local_model[ngram].fa = {}
-            local_model[ngram].counts = {}
-            
-            for wind in windows:
+        temp_gamma, temp_R, temp_error, temp_a = [], [], [], []
+
+        for _, row in current_df.iterrows():
+            ng = row["ngram"]
+            bm = np.zeros(L, dtype=np.int8)
+            for p in local_model[ng].pos:
+                bm[p] = 1
+            dt = calculate_distance(np.array(local_model[ng].pos, dtype=np.uint32),
+                                    L, condition, ng, int(min_dist_option))
+            local_model[ng].dt = dt
+
+            local_model[ng].fa     = {}
+            local_model[ng].counts = {}
+            for w in windows:
                 if overlap_mode == "overlapping":
-                    local_model[ngram].counts[wind] = make_windows(local_model[ngram].bool, wi=wind, l=L, wsh=wh_val, overlap_mode=overlap_mode)
+                    cts = make_windows(bm, wi=w, l=L, wsh=wh_val, overlap_mode=overlap_mode)
                 else:
-                    local_model[ngram].counts[wind] = make_windows(local_model[ngram].bool, wi=wind, l=L, wsh=wh_val, 
-                                                                overlap_mode=overlap_mode, min_window=w_val, window_expansion=we_val)
-                local_model[ngram].fa[wind] = mse(local_model[ngram].counts[wind])
-            
-            ff = [local_model[ngram].fa[wind] for wind in windows]
-            
+                    cts = make_windows(bm, wi=w, l=L, wsh=wh_val,
+                                       overlap_mode=overlap_mode,
+                                       min_window=w_val, window_expansion=we_val)
+                local_model[ng].counts[w] = cts
+                local_model[ng].fa[w]     = mse(cts)
+
+            ff = [local_model[ng].fa[w] for w in windows]
             try:
-                c, _ = curve_fit(fit, windows, ff, method='lm', maxfev=5000)
-                a_val = c[0]
+                c, _ = curve_fit(fit, windows, ff, method="lm", maxfev=5000)
+                a_val     = c[0]
                 gamma_val = c[1]
-                temp_fa = [fit(w_val, c[0], c[1]) for w_val in windows]
-                temp_error.append(round(r2_score(ff, temp_fa), 5))
+                fit_vals  = [fit(w, a_val, gamma_val) for w in windows]
+                temp_error.append(round(r2_score(ff, fit_vals), 5))
                 temp_gamma.append(round(gamma_val, 8))
                 temp_a.append(round(a_val, 8))
             except:
-                # Handle curve fitting errors
-                temp_error.append(0)
-                temp_gamma.append(0)
-                temp_a.append(0)
-            
-            r = round(R(np.array(local_model[ngram].dt)), 8)
-            temp_R.append(r)
-        
-        # Handle n-grams formatting if needed
+                temp_error.extend([0])
+                temp_gamma.extend([0])
+                temp_a.extend([0])
+
+            temp_R.append(round(R(dt), 8))
+
+        # format ngram column if needed
         if n_size > 1:
-            temp_ngram = []
-            for ng in current_df['ngram']:
-                if isinstance(ng, tuple):
-                    temp_ngram.append(" ".join(ng))
-                else:
-                    temp_ngram.append(ng)
-            current_df["ngram"] = temp_ngram
-        
-        # Add calculated parameters to DataFrame
-        current_df['R'] = temp_R
-        current_df['gamma'] = temp_gamma
-        current_df['a'] = temp_a
-        current_df['goodness'] = temp_error
-        current_df = current_df.sort_values(by="F", ascending=False)
-        current_df['rank'] = range(1, len(current_df) + 1)
-        
-        # Calculate the 8 parameters
+            current_df["ngram"] = [
+                " ".join(ng) if isinstance(ng, tuple) else ng
+                for ng in current_df["ngram"]
+            ]
+
+        current_df["R"]       = temp_R
+        current_df["gamma"]   = temp_gamma
+        current_df["a"]       = temp_a
+        current_df["goodness"]= temp_error
+        current_df            = current_df.sort_values(by="F", ascending=False)
+        current_df["rank"]    = range(1, len(current_df)+1)
+
+        # summary stats
         df_filtered = current_df.copy()
-        if len(df_filtered) > 0:
-            df_filtered['w'] = df_filtered['F'] / df_filtered['F'].sum()
-            
-            R_avg = df_filtered['R'].mean()
-            dR = df_filtered['R'].std()
-            Rw_avg = (df_filtered['R'] * df_filtered['w']).sum()
-            dRw = np.sqrt((((df_filtered['R'] - Rw_avg) ** 2) * df_filtered['w']).sum())
-            
-            gamma_avg = df_filtered['gamma'].mean()
-            dgamma = df_filtered['gamma'].std()
-            gammaw_avg = (df_filtered['gamma'] * df_filtered['w']).sum()
-            dgammaw = np.sqrt((((df_filtered['gamma'] - gammaw_avg) ** 2) * df_filtered['w']).sum())
+        if not df_filtered.empty:
+            df_filtered["w"]     = df_filtered["F"] / df_filtered["F"].sum()
+            R_avg  = df_filtered["R"].mean();     dR    = df_filtered["R"].std()
+            Rw_avg = (df_filtered["R"]*df_filtered["w"]).sum()
+            dRw    = np.sqrt((((df_filtered["R"] - Rw_avg)**2)*df_filtered["w"]).sum())
+            γ_avg  = df_filtered["gamma"].mean(); dγ    = df_filtered["gamma"].std()
+            γw_avg = (df_filtered["gamma"]*df_filtered["w"]).sum()
+            dγw    = np.sqrt((((df_filtered["gamma"] - γw_avg)**2)*df_filtered["w"]).sum())
         else:
-            # Default values if no data
-            R_avg = dR = Rw_avg = dRw = gamma_avg = dgamma = gammaw_avg = dgammaw = 0
-        
-        # Calculate execution time
-        end_time = time()
-        execution_time = end_time - start_time
-        
-        # Create batch result (store only what's needed for the table)
-        batch_result = {
-            "no": idx,
-            "filename": filename,
-            "f_min": f_min,
-            "length": L,
-            "vocabulary": V,
-            "time": round(execution_time, 3),
-            "r_avg": round(R_avg, 8),
-            "dr": round(dR, 8),
-            "rw_avg": round(Rw_avg, 8),
-            "drw": round(dRw, 8),
-            "gamma_avg": round(gamma_avg, 8),
-            "dgamma": round(dgamma, 8),
-            "gammaw_avg": round(gammaw_avg, 8),
-            "dgammaw": round(dgammaw, 8)
-        }
-        
-        batch_results.append(batch_result)
-        
-        # Explicitly clean up all local variables
-        del data
-        del local_model
-        del current_df
-        del df_filtered
-        del temp_gamma
-        del temp_R
-        del temp_error
-        del temp_a
-        
-        # Force garbage collection multiple times
+            R_avg = dR = Rw_avg = dRw = γ_avg = dγ = γw_avg = dγw = 0
+
+        exec_time = time() - start_time
+
+        batch_results.append({
+            "no":           idx,
+            "filename":     filename,
+            "f_min":        f_min,
+            "length":       L,
+            "vocabulary":   V,
+            "time":         round(exec_time, 3),
+            "r_avg":        round(R_avg, 8),
+            "dr":           round(dR, 8),
+            "rw_avg":       round(Rw_avg, 8),
+            "drw":          round(dRw, 8),
+            "gamma_avg":    round(γ_avg, 8),
+            "dgamma":       round(dγ, 8),
+            "gammaw_avg":   round(γw_avg, 8),
+            "dgammaw":      round(dγw, 8)
+        })
+
+        # cleanup
+        del data, local_model, current_df, df_filtered
+        del temp_gamma, temp_R, temp_error, temp_a
         gc.collect()
-        gc.collect()
-    
-    # Calculate statistics if we have results
+
+    # add mean & stddev rows
     if batch_results:
-        # Add the mean and standard deviation rows after all files processed
         add_batch_statistics(batch_results)
-    
+
     return batch_results, {"display": "block"}
     
 def add_batch_statistics(results):
@@ -2037,59 +2036,96 @@ def save_batch_results(n_clicks, n_size, split, condition, definition, min_dist_
      Output("v", "children"),
      Output("t", "children"),
      Output("click-toast", "is_open")],
-    [Input("chain_button", "n_clicks"),
-     Input("analyze_code", "n_clicks"),
-     Input("dataframe", "active_tab")],
-    [State("file-selector", "value"),
-     State("f_min",        "value"),
-     State("w_min",        "value"),
-     State("w_s",          "value"),
-     State("w_e",          "value"),
-     State("w_max",        "value"),
-     State("def",          "value"),
+    [Input("chain_button",   "n_clicks"),
+     Input("analyze_code",   "n_clicks"),
+     Input("dataframe",      "active_tab")],
+    [State("file-selector",  "value"),
+     State("f_min",          "value"),
+     State("w_min",          "value"),
+     State("w_s",            "value"),
+     State("w_e",            "value"),
+     State("w_max",          "value"),
+     State("def",            "value"),
      State("min_dist_option","value"),
-     State("overlap_mode", "value"),
-     State("n_size",       "value"),
-     State("split",        "value"),
-     State("condition",    "value")]
+     State("overlap_mode",   "value"),
+     State("n_size",         "value"),
+     State("split",          "value"),
+     State("condition",      "value")]
 )
-def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
+def update_table(chain_clicks, code_clicks, dataframe,
+                 filename, f_min, w_min, w_s, w_e, w_max,
                  definition, min_dist_option, overlap_mode,
                  n_size, split, condition):
+
     ctx = callback_context
     if not ctx.triggered:
         raise exceptions.PreventUpdate
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
-    global model, L, V, df, new_ngram, analysis_mode, current_model, current_tokens, current_windows, python_metrics, current_L, current_w_s_val
+    global model, L, V, df, new_ngram, analysis_mode
+    global current_model, current_tokens, current_windows, python_metrics, current_L, current_w_s_val
 
+    # ---- CODE ANALYSIS BRANCH ----
     if triggered_id == "analyze_code":
-        code = uploaded_files.get(filename, "")
-        tokens = tokenize_code(code)
+        raw = uploaded_files.get(filename, "")
+        tokens: List[str] = []
 
-        # UI window params
-        w_s_val = int(w_s) if w_s else 1
-        w_max_val = int(w_max) if w_max else len(tokens)
-        w_e_val = int(w_e) if w_e else w_s_val
-        if w_e_val == 0: w_e_val = 1
+        # 1) break into lines so we can detect comments
+        for line in raw.splitlines():
+            if "#" in line:
+                code_part, comment_part = line.split("#", 1)
+                # a) code tokens (including any operators, keywords, etc.)
+                tokens += tokenize_code(code_part)
+                # b) the '#' itself
+                tokens.append("#")
+                # c) now the comment, as natural text n‐grams
+                #    (uses the same n_size & split you already pass in)
+                #    note: prepare_data returns a list of n‐grams
+                comment_ngrams = prepare_data(comment_part, n_size, split)
+                if comment_ngrams is not dash.no_update:
+                    tokens += comment_ngrams
+            else:
+                tokens += tokenize_code(line)
+
+        L = len(tokens)
+
+        # --- determine window parameters (static vs dynamic) ---
+        if definition == "dynamic":
+            w_max_val = max(int(L/10), 1)
+            w_min_val = max(int(w_max_val/10), 1)
+            w_s_val   = w_min_val
+            w_e_val   = w_min_val
+        else:
+            w_min_val = int(w_min) if w_min else 1
+            w_s_val   = int(w_s)   if w_s   else w_min_val
+            w_e_val   = int(w_e)   if w_e   else w_s_val
+            w_max_val = int(w_max) if w_max else L
+
+        # guard against zero
+        if w_e_val == 0:
+            w_e_val = 1
+
         windows = list(range(w_s_val, w_max_val, w_e_val)) or [w_s_val]
 
-        # build model & compute metrics
-        L = len(tokens)
-        local_model = {}
-        pm = {}  # temp python_metrics
         start = time()
+        local_model     = {}
+        python_metrics  = {}
 
+        # --- build token model (positions + boolean mask) ---
         for idx, tok in enumerate(tokens):
             if tok not in local_model:
                 ng = Ngram()
-                ng.pos = []
+                ng.pos  = []
                 ng.bool = np.zeros(L, dtype=np.uint8)
                 local_model[tok] = ng
             local_model[tok].pos.append(idx)
             local_model[tok].bool[idx] = 1
 
-        for tok in local_model:
+        # --- apply frequency filter ---
+        filtered_keys = [tok for tok, ng in local_model.items() if len(ng.pos) >= f_min]
+
+        # --- compute metrics for each filtered token ---
+        for tok in filtered_keys:
             ng = local_model[tok]
             dt = calculate_distance(
                 np.array(ng.pos, dtype=np.uint32),
@@ -2101,68 +2137,76 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
                 counts = make_windows(
                     ng.bool, wi=w, l=L, wsh=w_s_val,
                     overlap_mode=overlap_mode,
-                    min_window=(w_s_val if overlap_mode != 'overlapping' else None),
-                    window_expansion=(w_e_val if overlap_mode != 'overlapping' else None)
+                    min_window    = (w_min_val if overlap_mode != "overlapping" else None),
+                    window_expansion = (w_e_val   if overlap_mode != "overlapping" else None)
                 )
                 fa_vals.append(mse(counts))
 
             try:
-                c, _ = curve_fit(fit, windows, fa_vals, method='lm', maxfev=5000)
-                a_val = round(c[0], 8)
+                c, _      = curve_fit(fit, windows, fa_vals, method="lm", maxfev=5000)
+                a_val     = round(c[0], 8)
                 gamma_val = round(c[1], 8)
-                fit_vals = [fit(w, *c) for w in windows]
-                goodness = round(r2_score(fa_vals, fit_vals), 5)
+                fit_vals  = [fit(w, *c) for w in windows]
+                goodness  = round(r2_score(fa_vals, fit_vals), 5)
             except:
                 a_val = gamma_val = goodness = 0.0
-                fit_vals = [0] * len(windows)
+                fit_vals = [0]*len(windows)
 
             R_val = round(R(dt), 8)
 
-            pm[tok] = {
-                'dt': dt,
-                'fa_vals': fa_vals,
-                'fit_vals': fit_vals,
-                'R': R_val,
-                'a': a_val,
-                'gamma': gamma_val,
-                'goodness': goodness
+            python_metrics[tok] = {
+                "dt":       dt,
+                "fa_vals":  fa_vals,
+                "fit_vals": fit_vals,
+                "R":        R_val,
+                "a":        a_val,
+                "gamma":    gamma_val,
+                "goodness": goodness
             }
 
         execution_time = time() - start
 
-        # build DataTable records
+        # --- prepare DataTable records, sorted by frequency desc ---
+        sorted_tokens = sorted(
+            filtered_keys,
+            key=lambda t: len(local_model[t].pos),
+            reverse=True
+        )
+
         records = []
-        for rank, tok in enumerate(local_model.keys(), start=1):
-            m = pm[tok]
+        for rank, tok in enumerate(sorted_tokens, start=1):
+            m = python_metrics[tok]
             records.append({
-                'rank': rank,
-                'ngram': tok,
-                'F': len(local_model[tok].pos),
-                'R': m['R'],
-                'a': m['a'],
-                'gamma': m['gamma'],
-                'goodness': m['goodness']
+                "rank":     rank,
+                "ngram":    tok,
+                "F":        len(local_model[tok].pos),
+                "R":        m["R"],
+                "a":        m["a"],
+                "gamma":    m["gamma"],
+                "goodness": m["goodness"]
             })
 
-        # stash globals for graphs
-        analysis_mode = 'py'
-        current_model = local_model
-        current_tokens = tokens
+        # stash for the graphs callbacks
+        analysis_mode   = "py"
+        current_model   = local_model
+        current_tokens  = tokens
         current_windows = windows
-        python_metrics = pm
-        current_L = L
+        current_L       = L
         current_w_s_val = w_s_val
+        V = len(filtered_keys)
 
         return (
             records,
-            dash.no_update,  # keep your chart as-is
-            {"display": "inline"},  # show table
-            {"display": "none"},  # hide chain pane
-            dash.no_update,  # no alert
-            f"Vocabulary: {len(local_model)}",
+            dash.no_update,            # keep existing chain figure
+            {"display": "inline"},     # show the table
+            {"display": "none"},       # hide the chain panel
+            dash.no_update,            # no alert
+            f"Vocabulary: {V}",
             f"Time: {execution_time:.4f} s",
-            False  # close toast
+            False                      # close toast
         )
+
+    # ---- NATURAL-TEXT (MarkovChain) BRANCH ----
     elif triggered_id == "chain_button":
         # Очищуємо кеш для мемоізованих функцій
         if hasattr(prepare_data, 'clear_cache'):
