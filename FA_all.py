@@ -57,23 +57,124 @@ current_w_s_val = 1
 # ─────────────────────────────────────────────────────
 
 
+import re
+from typing import List
+
+import re
+from typing import List
+from string import punctuation
+
+import os, re
+from typing import List
+
 def tokenize_code(data: str) -> List[str]:
     """
-    Tokenize Python code into:
-     - identifiers
-     - integers
-     - multi-char operators (==, !=, <=, >=, +=, etc.)
-     - triple‐dot (...)
-     - every single operator / punctuation character as its own token
+    Tokenize code in Python, JS/TS, Java, C/C++:
+      - string literals (kept intact, but when you split them out you can re-tokenize as words)
+      - identifiers (allows $ for JS)
+      - numeric literals
+      - multi-char operators (===, !==, >>>, <<=, &&, ||, ++, --, //, /*, */…)
+      - single-character punctuation/operators
     """
-    token_pattern = (
-        r"[A-Za-z_][A-Za-z0-9_]*"  # identifiers
-        r"|\d+"  # integers
-        r"|==|!=|<=|>=|\+=|-=|\*=|/=|%=|//|<<|>>|->"  # multi-char ops
-        r"|\.{3}"  # triple-dot
-        r"|[+\-*/%=&|^~<>!:#;.,()\[\]{}\"']"
-    )
-    return re.findall(token_pattern, data)
+    token_pattern = re.compile(r"""
+        # --- string literals (we match them so they don't break operators) ---
+        "(?:\\.|[^"\\])*"           # double-quoted
+      | '(?:\\.|[^'\\])*'           # single-quoted
+      | `(?:\\.|[^`\\])*`           # backtick template
+
+        # --- identifiers & keywords ---
+      | [A-Za-z_$][\w$]*            # letter/underscore/$ start
+
+        # --- numeric literals ---
+      | \d+\.\d+(?:[eE][+-]?\d+)?   # floats
+      | \d+(?:[eE][+-]?\d+)?        # ints
+
+        # --- multi-char operators & comment markers ---
+      | ===|!==|>>>|>>=|<<=|>>|<<   # equality & shifts
+      | &&|\|\||\+\+|--             # logical and inc/dec
+      | \+=|-=|\*=|/=|%=            # assignment variants
+      | ==|!=|<=|>=|=>              # comparisons & arrow
+      | \.\.\.                      # triple-dot
+      | //                          # single-line comment start
+      | /\*|\*/                     # block-comment delimiters
+
+        # --- single-char operators / punctuation ---
+      | [+\-*/%&|\^~!<>=?:;.,(){}$begin:math:display$$end:math:display$]
+    """, re.VERBOSE)
+
+    return token_pattern.findall(data)
+
+
+def tokenize_mixed_content(text: str, filename: str) -> List[str]:
+    """
+    Split `text` into comment vs code spans, then:
+      - comments        → full code-tokenization (so you get //, ===, words, etc.)
+      - code spans      → further split out string literals vs code
+                            * string literals → natural-language words
+                            * code           → tokenize_code()
+      - everything else → natural-language words
+    """
+    _, ext = os.path.splitext(filename.lower())
+    tokens: List[str] = []
+
+    def nat_words(s: str):
+        # your existing word-splitter
+        return remove_punctuation_for_words(s)
+
+    # PYTHON
+    if ext == '.py':
+        parts = re.split(r'(\#.*?$|\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\')',
+                         text, flags=re.MULTILINE)
+        for span in parts:
+            if not span:
+                continue
+            if span.startswith('#') or span.startswith('"""') or span.startswith("'''"):
+                # still treat Python comments/docstrings as pure code-tokens
+                tokens.extend(tokenize_code(span))
+            else:
+                # inside code, pull out string literals …
+                sub = re.split(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)',
+                               span, flags=re.DOTALL)
+                for ss in sub:
+                    if not ss:
+                        continue
+                    if (ss.startswith('"') and ss.endswith('"')) \
+                    or (ss.startswith("'") and ss.endswith("'")) \
+                    or (ss.startswith('`') and ss.endswith('`')):
+                        # natural text inside quotes/backticks
+                        tokens.extend(nat_words(ss[1:-1]))
+                    else:
+                        tokens.extend(tokenize_code(ss))
+
+    # C-STYLE (JS/TS/Java/C/C++)
+    elif ext in {'.js', '.ts', '.java', '.c', '.cpp'}:
+        parts = re.split(r'(//.*?$|/\*[\s\S]*?\*/)',
+                         text, flags=re.MULTILINE)
+        for span in parts:
+            if not span:
+                continue
+            if span.startswith('//') or span.startswith('/*'):
+                # **now** tokenize comments exactly like code
+                tokens.extend(tokenize_code(span))
+            else:
+                # split out string literals
+                sub = re.split(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)',
+                               span, flags=re.DOTALL)
+                for ss in sub:
+                    if not ss:
+                        continue
+                    if (ss.startswith('"') and ss.endswith('"')) \
+                    or (ss.startswith("'") and ss.endswith("'")) \
+                    or (ss.startswith('`') and ss.endswith('`')):
+                        tokens.extend(nat_words(ss[1:-1]))
+                    else:
+                        tokens.extend(tokenize_code(ss))
+
+    # EVERYTHING ELSE
+    else:
+        tokens.extend(nat_words(text))
+
+    return tokens
 
 # Функція для очищення пам'яті
 def clear_memory(keep: List[str] = []):
@@ -1405,129 +1506,130 @@ length_updated = False
 @app.callback(
     [Output('upload-status', 'children'),
      Output('file-selector', 'options'),
-     Output('min-max-length-info', 'children')], # Added new output
+     Output('min-max-length-info', 'children')],
     [Input('upload-data', 'contents')],
     [State('upload-data', 'filename'),
      State('n_size', 'value'),
-     State('split', 'value')] # Added split state
+     State('split', 'value')]
 )
 def update_upload_status(contents, filenames, n_size, split_mode):
+    import re, base64
     global uploaded_files, file_lengths
-    
+
+    # prepare return‐values
     min_max_info = ""
-    options = [{'label': filename, 'value': filename, 'title': filename} for filename in list(uploaded_files.keys())]
-    
-    if contents is None:
-        # Calculate min/max even if no new files are uploaded, but existing ones are present
+    options = [{'label': fn, 'value': fn, 'title': fn}
+               for fn in uploaded_files]
+
+    # no new upload: just recompute Min/Max if we already have files
+    if not contents:
         if file_lengths and split_mode:
-            lengths = [file_lengths[filename].get(split_mode, 0) for filename in file_lengths]
+            lengths = [file_lengths[fn].get(split_mode, 0)
+                       for fn in file_lengths]
             if lengths:
-                min_len = min(lengths)
-                max_len = max(lengths)
-                split_label = "letters&numbers" if split_mode == 'letter' else f"{split_mode}s"
-                min_max_info = f"Min/Max Length ({split_label}): {min_len} / {max_len}"
-        return html.Div(["No new files uploaded"]), options, html.Div(min_max_info)
-    
+                split_label = "letters&numbers" if split_mode=='letter' else f"{split_mode}s"
+                min_max_info = f"Min/Max Length ({split_label}): {min(lengths)} / {max(lengths)}"
+        return html.Div("No new files uploaded"), options, html.Div(min_max_info)
+
     success_count = 0
-    error_count = 0
-    
-    for i, (content, filename) in enumerate(zip(contents, filenames)):
+    error_count   = 0
+
+    for content, filename in zip(contents, filenames):
         try:
-            content_type, content_string = content.split(',')
-            decoded = base64.b64decode(content_string)
+            # decode the upload
+            header, b64 = content.split(',', 1)
+            raw = base64.b64decode(b64)
 
-            try:
-                raw = decoded  # still bytes
+            # for .py apply mixed‐encoding (CP1251 for code, UTF-8 for comments/docstrings)
+            if filename.lower().endswith('.py'):
+                pieces = []
+                token_re = re.compile(
+                    rb"""
+                      (\# [^\n]*           )  # single-line comment
+                    | (\"\"\".*?\"\"\"     )  # triple-quoted double
+                    | (\'\'\'.*?\'\'\'     )  # triple-quoted single
+                    """,
+                    re.MULTILINE|re.DOTALL|re.VERBOSE
+                )
+                last = 0
+                for m in token_re.finditer(raw):
+                    # code before comment
+                    if m.start() > last:
+                        pieces.append(raw[last:m.start()]
+                                      .decode('cp1251', errors='replace'))
+                    # comment/docstring span
+                    pieces.append(raw[m.start():m.end()]
+                                  .decode('utf-8', errors='replace'))
+                    last = m.end()
+                # trailing code
+                if last < len(raw):
+                    pieces.append(raw[last:]
+                                  .decode('cp1251', errors='replace'))
+                file_content = "".join(pieces)
 
-                if filename.lower().endswith('.py'):
-                    pieces = []
-                    # A very simple regex that finds #…\n comments and triple-quoted docstrings
-                    token_re = re.compile(
-                        rb"""
-                        ( \# [^\n]*         )   # 1: single-line comment
-                      | (\"\"\".*?\"\"\"   )   # 2: triple-double-quoted string
-                      | (\'\'\'.*?\'\'\'   )   # 3: triple-single-quoted string
-                      """,
-                        re.MULTILINE | re.DOTALL | re.VERBOSE,
-                    )
-                    last = 0
-                    for m in token_re.finditer(raw):
-                        # decode the code between last and start of this match as CP1251
-                        if m.start() > last:
-                            pieces.append(raw[last:m.start()].decode('cp1251', errors='replace'))
-                        # decode the matched comment/docstring as UTF-8
-                        pieces.append(raw[m.start():m.end()].decode('utf-8', errors='replace'))
-                        last = m.end()
-                    # any trailing code
-                    if last < len(raw):
-                        pieces.append(raw[last:].decode('cp1251', errors='replace'))
+            else:
+                # everything else is natural text, UTF-8
+                file_content = raw.decode('utf-8', errors='replace')
 
-                    file_content = "".join(pieces)
+            # store
+            uploaded_files[filename] = file_content
+            file_lengths[filename] = {}
+
+            # now compute lengths exactly as before
+            # 1) words
+            txt = re.sub(r'\n+', '\n', file_content)
+            txt = re.sub(r'\n\s\s', '\n', txt)
+            txt = re.sub(r'﻿', '', txt)
+            txt = re.sub(r'--', ' -', txt)
+            proc = NgrammProcessor()
+            proc.preprocess(txt)
+            words = proc.get_words()
+            file_lengths[filename]['word'] = len(words)
+
+            # 2) symbols
+            syms = []
+            for ch in file_content:
+                if ch in (" ", "\n", "\ufeff"):
+                    syms.append("space")
                 else:
-                    # natural-language files are all UTF-8
-                    file_content = raw.decode('utf-8', errors='replace')
+                    syms.append(ch.lower())
+            file_lengths[filename]['symbol'] = len(syms)
 
-                uploaded_files[filename] = file_content
-                file_lengths[filename] = {}
-                
-                # Word length
-                text_word = re.sub(r'\n+', '\n', file_content)
-                text_word = re.sub(r'\n\s\s', '\n', text_word)
-                text_word = re.sub(r'﻿', '', text_word)
-                text_word = re.sub(r'--', ' -', text_word)
-                processor = NgrammProcessor()
-                processor.preprocess(text_word)
-                words = processor.get_words()
-                file_lengths[filename]['word'] = len(words)
-                
-                # Symbol length
-                symbols = []
-                for char in file_content:
-                    if char == " " or char == "\n" or char == "\ufeff":
-                        symbols.append("space")
-                    else:
-                        symbols.append(char.lower())
-                file_lengths[filename]['symbol'] = len(symbols)
-                
-                # Letter length
-                text_letter = remove_punctuation(file_content)
-                letters = []
-                for word in text_letter:
-                    for i in word:
-                        if i == ' ':
-                            continue
-                        letters.append(i)
-                file_lengths[filename]['letter'] = len(letters)
-                
-                print(f"✓ Uploaded: {filename}")
-                print(f"  Words: {file_lengths[filename]['word']} | Symbols: {file_lengths[filename]['symbol']} | Letters: {file_lengths[filename]['letter']}")
-                
-                success_count += 1
-            except UnicodeDecodeError:
-                print(f"✗ Error: {filename} is not a valid text file")
-                error_count += 1
+            # 3) letters&numbers
+            lett = remove_punctuation(file_content)
+            letters = []
+            for w in lett:
+                for c in w:
+                    if c != ' ':
+                        letters.append(c)
+            file_lengths[filename]['letter'] = len(letters)
+
+            success_count += 1
+
         except Exception as e:
-            print(f"✗ Error processing {filename}: {str(e)}")
+            print(f"✗ Error processing {filename}: {e}")
             error_count += 1
-    
-    summary_message = html.Div([
-        html.H5(f"Upload Summary:"),
-        html.P(f"Successfully uploaded: {success_count} file(s)", style={'color': 'green'}),
-        html.P(f"Files with errors: {error_count}", style={'color': 'red' if error_count > 0 else 'green'})
-    ])
-    
-    options = [{'label': filename, 'value': filename, 'title': filename} for filename in list(uploaded_files.keys())]
 
-    # Calculate Min/Max length based on the current split mode
+    # summary message
+    summary = html.Div([
+        html.H5("Upload Summary:"),
+        html.P(f"Successfully uploaded: {success_count}", style={'color':'green'}),
+        html.P(f"Errors: {error_count}", style={'color':'red' if error_count else 'green'})
+    ])
+
+    # rebuild selector options
+    options = [{'label': fn, 'value': fn, 'title': fn}
+               for fn in uploaded_files]
+
+    # recompute min/max
     if file_lengths and split_mode:
-        lengths = [file_lengths[filename].get(split_mode, 0) for filename in file_lengths]
+        lengths = [file_lengths[fn].get(split_mode, 0)
+                   for fn in file_lengths]
         if lengths:
-            min_len = min(lengths)
-            max_len = max(lengths)
-            split_label = "letters&numbers" if split_mode == 'letter' else f"{split_mode}s"
-            min_max_info = f"Min/Max Length ({split_label}): {min_len} / {max_len}"
-    
-    return summary_message, options, html.Div(min_max_info)
+            split_label = "letters&numbers" if split_mode=='letter' else f"{split_mode}s"
+            min_max_info = f"Min/Max Length ({split_label}): {min(lengths)} / {max(lengths)}"
+
+    return summary, options, html.Div(min_max_info)
 
 
 # Add callback to handle file selection
@@ -1630,117 +1732,94 @@ from dash import callback_context, exceptions
 @app.callback(
     [Output("batch_table", "data"),
      Output("batch_results_container", "style")],
-    [
-        Input("batch_process",      "n_clicks"),
-        Input("batch_process_code", "n_clicks"),
-    ],
-    [
-        State("fmin1",            "value"),
-        State("fmin2",            "value"),
-        State("split",            "value"),
-        State("n_size",           "value"),
-        State("condition",        "value"),
-        State("def",              "value"),
-        State("min_dist_option",  "value"),
-        State("overlap_mode",     "value"),
-        State("w_min",            "value"),
-        State("w_s",              "value"),
-        State("w_e",              "value"),
-        State("w_max",            "value"),
-        State("batch_window_mode","value"),
-    ]
+    [Input("batch_process", "n_clicks"),
+     Input("batch_process_code", "n_clicks")],
+    [State("fmin1", "value"),
+     State("fmin2", "value"),
+     State("split", "value"),
+     State("n_size", "value"),
+     State("condition", "value"),
+     State("def", "value"),
+     State("min_dist_option", "value"),
+     State("overlap_mode", "value"),
+     State("w_min", "value"),
+     State("w_s", "value"),
+     State("w_e", "value"),
+     State("w_max", "value"),
+     State("batch_window_mode", "value")]
 )
-def process_all_files(n_clicks_text, n_clicks_code,
-                      fmin1, fmin2, split, n_size, condition, definition, min_dist_option,
-                      overlap_mode, w_min, w_s, w_e, w_max, batch_window_mode):
+def process_all_files(text_clicks, code_clicks,
+                      fmin1, fmin2, split, n_size, condition, definition,
+                      min_dist_option, overlap_mode, w_min, w_s, w_e, w_max,
+                      batch_window_mode):
+    import os, gc
+    from time import time
+
+    # Which button was clicked?
     ctx = callback_context
     if not ctx.triggered:
-        raise exceptions.PreventUpdate
-    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        raise dash.exceptions.PreventUpdate
+    triggered = ctx.triggered[0]["prop_id"].split(".")[0]
 
-    # nothing to do if no uploads
-    if not uploaded_files:
-        return [], {"display": "none"}
+    # Partition uploaded_files into text vs code sets
+    code_exts = {".py", ".js", ".ts", ".java", ".c", ".cpp"}
+    all_files = list(uploaded_files.keys())
 
-    # filter files based on which button was clicked
-    if triggered_id == "batch_process_code":
-        # only .py files
-        file_list = [
-            (fn, txt) for fn, txt in uploaded_files.items()
-            if fn.lower().endswith(".py")
-        ]
+    if triggered == "batch_process":
+        # natural-text batch: skip any code extensions
+        file_list = [(fn, uploaded_files[fn])
+                     for fn in all_files
+                     if os.path.splitext(fn.lower())[1] not in code_exts]
+        if text_clicks is None:
+            return [], {"display": "none"}
+
+    elif triggered == "batch_process_code":
+        # code-only batch: only files with code extensions
+        file_list = [(fn, uploaded_files[fn])
+                     for fn in all_files
+                     if os.path.splitext(fn.lower())[1] in code_exts]
+        if code_clicks is None:
+            return [], {"display": "none"}
+
     else:
-        # only non-.py files
-        file_list = [
-            (fn, txt) for fn, txt in uploaded_files.items()
-            if not fn.lower().endswith(".py")
-        ]
+        # shouldn't happen
+        raise dash.exceptions.PreventUpdate
 
+    # nothing to do?
     if not file_list:
         return [], {"display": "none"}
 
-    # compute global min/max lengths for interpolation
+    # compute lmin/lmax on chosen subset
     lengths = [file_lengths[fn][split] for fn, _ in file_list]
-    if not lengths:
-        return [], {"display": "none"}
     lmin, lmax = min(lengths), max(lengths)
 
-    batch_results = []
+    batch_results.clear()
 
-    # iterate over filtered files
-    for idx, (filename, file_content) in enumerate(file_list, 1):
+    # -- loop over selected files --
+    for idx, (filename, file_content) in enumerate(file_list, start=1):
         gc.collect()
-
-        # interpolate F_min
-        file_length = file_lengths[filename][split]
+        L_file = file_lengths[filename][split]
+        # linear interpolate f_min
         if lmin == lmax:
             f_min = fmin1
         else:
-            f_min = fmin1 + (fmin2 - fmin1) * (file_length - lmin) / (lmax - lmin)
-            f_min = round(f_min)
+            f_min = round(fmin1 + (fmin2 - fmin1) * (L_file - lmin) / (lmax - lmin))
 
         start_time = time()
 
-        # prepare data
+        # reuse your existing pipeline *verbatim*
+        # 1) prepare data list
         if definition == "dynamic":
             data = prepare_data(file_content, n_size, split)
         else:
+            # static split: same code you already have
             if split == "letter":
-                txt = re.sub(r'\t', '', file_content)
-                proc = remove_punctuation(txt)
-                temp = []
-                cur = ""
-                for ch in proc:
-                    if ch.isspace() or ch == "\ufeff":
-                        if cur:
-                            temp.append(cur)
-                            cur = ""
-                        continue
-                    cur += ch
-                if cur:
-                    temp.append(cur)
-                data = temp
-                del txt, proc, temp, cur
-                gc.collect()
-
+                cleaned = remove_punctuation(file_content)
+                data = [ch for w in cleaned for ch in w if ch != " "]
             elif split == "symbol":
-                clean = re.sub(r'\t', '', file_content)
-                clean = re.sub(r'\n+', '\n', clean)
-                clean = re.sub(r'\n\s\s', '\n', clean)
-                clean = re.sub(r'﻿', '', clean)
-                temp = []
-                for ch in clean:
-                    if ch in [" ", "\n", "\ufeff"]:
-                        temp.append("space")
-                    elif is_valid_letter(ch):
-                        continue
-                    else:
-                        temp.append(ch.lower())
-                data = temp
-                del clean, temp
-                gc.collect()
-
-            elif split == "word":
+                data = ["space" if ch in {" ", "\n", "\ufeff"} else ch.lower()
+                        for ch in file_content]
+            else:  # word
                 txt = re.sub(r'\n+', '\n', file_content)
                 txt = re.sub(r'\n\s\s', '\n', txt)
                 txt = re.sub(r'﻿', '', txt)
@@ -1748,141 +1827,106 @@ def process_all_files(n_clicks_text, n_clicks_code,
                 proc = NgrammProcessor()
                 proc.preprocess(txt)
                 data = proc.get_words()
-                del txt, proc
-                gc.collect()
-
         L = len(data)
 
-        # window params
+        # 2) window parameters
         if batch_window_mode == "ui":
-            wm_val = int(w_max) if w_max else int(L/20)
-            w_val  = int(w_s)   if w_s   else int(wm_val/10)
-            wh_val = int(w_s)   if w_s   else w_val
-            we_val = int(w_e)   if w_e   else w_val
+            wm_val = int(w_max) if w_max is not None else max(10, L//20)
+            w_val  = int(w_s) if w_s is not None else max(1, wm_val//10)
+            wh_val = w_val
+            we_val = int(w_e) if w_e is not None else w_val
         else:
             if definition == "dynamic":
-                wm_val = int(L/10); w_val = int(wm_val/10)
+                wm_val = max(10, L//10)
+                w_val  = max(1, wm_val//10)
             else:
-                wm_val = int(L/20); w_val = int(wm_val/20)
-            wh_val = w_val; we_val = w_val
+                wm_val = max(10, L//20)
+                w_val  = max(1, wm_val//20)
+            wh_val = w_val
+            we_val = w_val
 
-        wm_val = max(10, wm_val)
-        w_val  = max(5, w_val)
-        wh_val = max(1, wh_val)
-        we_val = max(1, we_val)
+        wm_val, w_val, wh_val, we_val = map(lambda x: max(1, x),
+                                            (wm_val, w_val, wh_val, we_val))
 
-        # build local model
+        # 3) build frequency model
         local_model = {}
-        for i in range(L - n_size + 1):
-            if i + n_size <= len(data):
-                ng = data[i] if n_size == 1 else tuple(data[i:i+n_size])
-                if ng not in local_model:
-                    local_model[ng] = Ngram(); local_model[ng].pos = []
-                local_model[ng].pos.append(i)
+        for pos, gram in enumerate(data):
+            if gram not in local_model:
+                ng = Ngram()
+                ng.pos  = []
+                local_model[gram] = ng
+            local_model[gram].pos.append(pos)
 
-        V = len(local_model)
+        # 4) apply f_min filter
+        valid = [g for g in local_model if len(local_model[g].pos) >= f_min]
 
-        # filter by f_min
-        filtered = [ng for ng in local_model if len(local_model[ng].pos) >= f_min]
-        data_df = {"ngram": [], "F": np.empty(len(filtered), dtype=np.int32)}
-        for j, ng in enumerate(filtered):
-            data_df["ngram"].append(ng)
-            data_df["F"][j] = len(local_model[ng].pos)
-        current_df = pd.DataFrame(data=data_df)
-
-        # compute metrics
+        # 5) compute metrics
+        temp_R, temp_a, temp_gamma, temp_err = [], [], [], []
         windows = list(range(w_val, wm_val, we_val))
-        temp_gamma, temp_R, temp_error, temp_a = [], [], [], []
+        for gram in valid:
+            ng = local_model[gram]
+            # boolean array
+            ng.bool = np.zeros(L, dtype=np.uint8)
+            for p in ng.pos:
+                ng.bool[p] = 1
 
-        for _, row in current_df.iterrows():
-            ng = row["ngram"]
-            bm = np.zeros(L, dtype=np.int8)
-            for p in local_model[ng].pos:
-                bm[p] = 1
-            dt = calculate_distance(np.array(local_model[ng].pos, dtype=np.uint32),
-                                    L, condition, ng, int(min_dist_option))
-            local_model[ng].dt = dt
+            # distance
+            ng.dt = calculate_distance(
+                np.array(ng.pos, dtype=np.uint32),
+                L, condition, gram, int(min_dist_option)
+            )
 
-            local_model[ng].fa     = {}
-            local_model[ng].counts = {}
+            # fluctuation
+            ff_vals = []
             for w in windows:
-                if overlap_mode == "overlapping":
-                    cts = make_windows(bm, wi=w, l=L, wsh=wh_val, overlap_mode=overlap_mode)
-                else:
-                    cts = make_windows(bm, wi=w, l=L, wsh=wh_val,
-                                       overlap_mode=overlap_mode,
-                                       min_window=w_val, window_expansion=we_val)
-                local_model[ng].counts[w] = cts
-                local_model[ng].fa[w]     = mse(cts)
+                cnts = make_windows(
+                    ng.bool, wi=w, l=L, wsh=wh_val,
+                    overlap_mode=overlap_mode,
+                    min_window=(w_val if overlap_mode!="overlapping" else None),
+                    window_expansion=(we_val if overlap_mode!="overlapping" else None)
+                )
+                ff_vals.append(mse(cnts))
+            ng.fa = dict(zip(windows, ff_vals))
 
-            ff = [local_model[ng].fa[w] for w in windows]
+            # fit
             try:
-                c, _ = curve_fit(fit, windows, ff, method="lm", maxfev=5000)
-                a_val     = c[0]
-                gamma_val = c[1]
-                fit_vals  = [fit(w, a_val, gamma_val) for w in windows]
-                temp_error.append(round(r2_score(ff, fit_vals), 5))
-                temp_gamma.append(round(gamma_val, 8))
-                temp_a.append(round(a_val, 8))
+                c, _ = curve_fit(fit, windows, ff_vals, method="lm", maxfev=5000)
+                a_val, g_val = c[0], c[1]
+                fit_vals = [fit(w, *c) for w in windows]
+                err = r2_score(ff_vals, fit_vals)
             except:
-                temp_error.extend([0])
-                temp_gamma.extend([0])
-                temp_a.extend([0])
+                a_val = g_val = err = 0.0
 
-            temp_R.append(round(R(dt), 8))
+            temp_R.append(round(R(ng.dt), 8))
+            temp_a.append(round(a_val,   8))
+            temp_gamma.append(round(g_val,8))
+            temp_err.append(round(err,    5))
 
-        # format ngram column if needed
-        if n_size > 1:
-            current_df["ngram"] = [
-                " ".join(ng) if isinstance(ng, tuple) else ng
-                for ng in current_df["ngram"]
-            ]
-
-        current_df["R"]       = temp_R
-        current_df["gamma"]   = temp_gamma
-        current_df["a"]       = temp_a
-        current_df["goodness"]= temp_error
-        current_df            = current_df.sort_values(by="F", ascending=False)
-        current_df["rank"]    = range(1, len(current_df)+1)
-
-        # summary stats
-        df_filtered = current_df.copy()
-        if not df_filtered.empty:
-            df_filtered["w"]     = df_filtered["F"] / df_filtered["F"].sum()
-            R_avg  = df_filtered["R"].mean();     dR    = df_filtered["R"].std()
-            Rw_avg = (df_filtered["R"]*df_filtered["w"]).sum()
-            dRw    = np.sqrt((((df_filtered["R"] - Rw_avg)**2)*df_filtered["w"]).sum())
-            γ_avg  = df_filtered["gamma"].mean(); dγ    = df_filtered["gamma"].std()
-            γw_avg = (df_filtered["gamma"]*df_filtered["w"]).sum()
-            dγw    = np.sqrt((((df_filtered["gamma"] - γw_avg)**2)*df_filtered["w"]).sum())
-        else:
-            R_avg = dR = Rw_avg = dRw = γ_avg = dγ = γw_avg = dγw = 0
-
-        exec_time = time() - start_time
-
+        # 6) build DataFrame row & collect stats
+        V = len(valid)
+        elapsed = round(time() - start_time, 3)
         batch_results.append({
-            "no":           idx,
-            "filename":     filename,
-            "f_min":        f_min,
-            "length":       L,
-            "vocabulary":   V,
-            "time":         round(exec_time, 3),
-            "r_avg":        round(R_avg, 8),
-            "dr":           round(dR, 8),
-            "rw_avg":       round(Rw_avg, 8),
-            "drw":          round(dRw, 8),
-            "gamma_avg":    round(γ_avg, 8),
-            "dgamma":       round(dγ, 8),
-            "gammaw_avg":   round(γw_avg, 8),
-            "dgammaw":      round(dγw, 8)
+            "no":         idx,
+            "filename":   filename,
+            "f_min":      f_min,
+            "length":     L,
+            "vocabulary": V,
+            "time":       elapsed,
+            "r_avg":      round(np.mean(temp_R),   8) if temp_R else 0,
+            "dr":         round(np.std(temp_R),    8) if temp_R else 0,
+            "rw_avg":     round(np.average(temp_R, weights=np.array(temp_R)/sum(temp_R)), 8) if temp_R else 0,
+            "drw":        round(np.sqrt(np.average((np.array(temp_R)-np.average(temp_R, weights=np.array(temp_R)/sum(temp_R)))**2, weights=np.array(temp_R)/sum(temp_R))), 8) if temp_R else 0,
+            "gamma_avg":  round(np.mean(temp_gamma),8) if temp_gamma else 0,
+            "dgamma":     round(np.std(temp_gamma), 8) if temp_gamma else 0,
+            "gammaw_avg":round(np.average(temp_gamma, weights=np.array(temp_gamma)/sum(temp_gamma)), 8) if temp_gamma else 0,
+            "dgammaw":   round(np.sqrt(np.average((np.array(temp_gamma)-np.average(temp_gamma, weights=np.array(temp_gamma)/sum(temp_gamma)))**2, weights=np.array(temp_gamma)/sum(temp_gamma))), 8) if temp_gamma else 0,
         })
 
         # cleanup
-        del data, local_model, current_df, df_filtered
-        del temp_gamma, temp_R, temp_error, temp_a
+        del data, local_model
         gc.collect()
 
-    # add mean & stddev rows
+    # add MEAN/STDDEV rows if any
     if batch_results:
         add_batch_statistics(batch_results)
 
@@ -2036,96 +2080,82 @@ def save_batch_results(n_clicks, n_size, split, condition, definition, min_dist_
      Output("v", "children"),
      Output("t", "children"),
      Output("click-toast", "is_open")],
-    [Input("chain_button",   "n_clicks"),
-     Input("analyze_code",   "n_clicks"),
-     Input("dataframe",      "active_tab")],
-    [State("file-selector",  "value"),
-     State("f_min",          "value"),
-     State("w_min",          "value"),
-     State("w_s",            "value"),
-     State("w_e",            "value"),
-     State("w_max",          "value"),
-     State("def",            "value"),
+    [Input("chain_button", "n_clicks"),
+     Input("analyze_code", "n_clicks"),
+     Input("dataframe", "active_tab")],
+    [State("file-selector", "value"),
+     State("f_min",        "value"),
+     State("w_min",        "value"),
+     State("w_s",          "value"),
+     State("w_e",          "value"),
+     State("w_max",        "value"),
+     State("def",          "value"),
      State("min_dist_option","value"),
-     State("overlap_mode",   "value"),
-     State("n_size",         "value"),
-     State("split",          "value"),
-     State("condition",      "value")]
+     State("overlap_mode", "value"),
+     State("n_size",       "value"),
+     State("split",        "value"),
+     State("condition",    "value")]
 )
-def update_table(chain_clicks, code_clicks, dataframe,
-                 filename, f_min, w_min, w_s, w_e, w_max,
+def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
                  definition, min_dist_option, overlap_mode,
                  n_size, split, condition):
-
     ctx = callback_context
     if not ctx.triggered:
         raise exceptions.PreventUpdate
     triggered_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
-    global model, L, V, df, new_ngram, analysis_mode
-    global current_model, current_tokens, current_windows, python_metrics, current_L, current_w_s_val
+    global model, L, V, df, new_ngram
+    global analysis_mode, current_model, current_tokens, current_windows, python_metrics, current_L, current_w_s_val
 
-    # ---- CODE ANALYSIS BRANCH ----
+    # ------------------------------
+    # HANDLE "Analyze code" BUTTON
+    # ------------------------------
     if triggered_id == "analyze_code":
-        raw = uploaded_files.get(filename, "")
-        tokens: List[str] = []
+        code = uploaded_files.get(filename, "")
+        # split into tokens & comments
+        tokens = tokenize_mixed_content(code, filename)
 
-        # 1) break into lines so we can detect comments
-        for line in raw.splitlines():
-            if "#" in line:
-                code_part, comment_part = line.split("#", 1)
-                # a) code tokens (including any operators, keywords, etc.)
-                tokens += tokenize_code(code_part)
-                # b) the '#' itself
-                tokens.append("#")
-                # c) now the comment, as natural text n‐grams
-                #    (uses the same n_size & split you already pass in)
-                #    note: prepare_data returns a list of n‐grams
-                comment_ngrams = prepare_data(comment_part, n_size, split)
-                if comment_ngrams is not dash.no_update:
-                    tokens += comment_ngrams
-            else:
-                tokens += tokenize_code(line)
-
-        L = len(tokens)
-
-        # --- determine window parameters (static vs dynamic) ---
-        if definition == "dynamic":
-            w_max_val = max(int(L/10), 1)
-            w_min_val = max(int(w_max_val/10), 1)
-            w_s_val   = w_min_val
-            w_e_val   = w_min_val
+        # build ngrams if n_size > 1
+        n = int(n_size or 1)
+        if n > 1:
+            data = [tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
         else:
-            w_min_val = int(w_min) if w_min else 1
-            w_s_val   = int(w_s)   if w_s   else w_min_val
-            w_e_val   = int(w_e)   if w_e   else w_s_val
-            w_max_val = int(w_max) if w_max else L
+            data = tokens
 
-        # guard against zero
-        if w_e_val == 0:
-            w_e_val = 1
+        # total length
+        L = len(data)
+
+        # window parameters
+        if definition == "dynamic":
+            w_max_val = max(10, int(L/10))
+            w_s_val   = max(1, int(w_max_val/10))
+            w_e_val   = w_s_val
+        else:
+            w_s_val   = max(1, int(w_s or 1))
+            w_max_val = max(w_s_val+1, int(w_max or L))
+            w_e_val   = max(1, int(w_e or w_s_val))
 
         windows = list(range(w_s_val, w_max_val, w_e_val)) or [w_s_val]
 
-        start = time()
-        local_model     = {}
-        python_metrics  = {}
-
-        # --- build token model (positions + boolean mask) ---
-        for idx, tok in enumerate(tokens):
-            if tok not in local_model:
+        # build frequency model
+        local_model: Dict[Any, Ngram] = {}
+        for idx, gram in enumerate(data):
+            if gram not in local_model:
                 ng = Ngram()
                 ng.pos  = []
                 ng.bool = np.zeros(L, dtype=np.uint8)
-                local_model[tok] = ng
-            local_model[tok].pos.append(idx)
-            local_model[tok].bool[idx] = 1
+                local_model[gram] = ng
+            local_model[gram].pos.append(idx)
+            local_model[gram].bool[idx] = 1
 
-        # --- apply frequency filter ---
-        filtered_keys = [tok for tok, ng in local_model.items() if len(ng.pos) >= f_min]
+        # apply f_min filter
+        fmin_val = int(f_min or 1)
+        valid_keys = [tok for tok in local_model if len(local_model[tok].pos) >= fmin_val]
 
-        # --- compute metrics for each filtered token ---
-        for tok in filtered_keys:
+        # compute metrics
+        pm = {}
+        start = time()
+        for tok in valid_keys:
             ng = local_model[tok]
             dt = calculate_distance(
                 np.array(ng.pos, dtype=np.uint32),
@@ -2137,76 +2167,74 @@ def update_table(chain_clicks, code_clicks, dataframe,
                 counts = make_windows(
                     ng.bool, wi=w, l=L, wsh=w_s_val,
                     overlap_mode=overlap_mode,
-                    min_window    = (w_min_val if overlap_mode != "overlapping" else None),
-                    window_expansion = (w_e_val   if overlap_mode != "overlapping" else None)
+                    min_window=(w_s_val if overlap_mode != "overlapping" else None),
+                    window_expansion=(w_e_val if overlap_mode != "overlapping" else None)
                 )
                 fa_vals.append(mse(counts))
 
             try:
-                c, _      = curve_fit(fit, windows, fa_vals, method="lm", maxfev=5000)
+                c, _ = curve_fit(fit, windows, fa_vals, method="lm", maxfev=5000)
                 a_val     = round(c[0], 8)
                 gamma_val = round(c[1], 8)
                 fit_vals  = [fit(w, *c) for w in windows]
                 goodness  = round(r2_score(fa_vals, fit_vals), 5)
             except:
                 a_val = gamma_val = goodness = 0.0
-                fit_vals = [0]*len(windows)
+                fit_vals = [0] * len(windows)
 
             R_val = round(R(dt), 8)
 
-            python_metrics[tok] = {
-                "dt":       dt,
-                "fa_vals":  fa_vals,
+            pm[tok] = {
+                "dt": dt,
+                "fa_vals": fa_vals,
                 "fit_vals": fit_vals,
-                "R":        R_val,
-                "a":        a_val,
-                "gamma":    gamma_val,
+                "R": R_val,
+                "a": a_val,
+                "gamma": gamma_val,
                 "goodness": goodness
             }
 
         execution_time = time() - start
 
-        # --- prepare DataTable records, sorted by frequency desc ---
-        sorted_tokens = sorted(
-            filtered_keys,
-            key=lambda t: len(local_model[t].pos),
-            reverse=True
-        )
-
+        # build datatable records
         records = []
-        for rank, tok in enumerate(sorted_tokens, start=1):
-            m = python_metrics[tok]
+        for rank, tok in enumerate(valid_keys, start=1):
+            m = pm[tok]
             records.append({
-                "rank":     rank,
-                "ngram":    tok,
-                "F":        len(local_model[tok].pos),
-                "R":        m["R"],
-                "a":        m["a"],
-                "gamma":    m["gamma"],
+                "rank": rank,
+                "ngram": tok,
+                "F": len(local_model[tok].pos),
+                "R": m["R"],
+                "a": m["a"],
+                "gamma": m["gamma"],
                 "goodness": m["goodness"]
             })
 
-        # stash for the graphs callbacks
+        # stash globals for the plots
         analysis_mode   = "py"
         current_model   = local_model
-        current_tokens  = tokens
+        current_tokens  = data
         current_windows = windows
+        python_metrics  = pm
         current_L       = L
         current_w_s_val = w_s_val
-        V = len(filtered_keys)
+        V = len(valid_keys)
 
         return (
             records,
-            dash.no_update,            # keep existing chain figure
-            {"display": "inline"},     # show the table
-            {"display": "none"},       # hide the chain panel
+            dash.no_update,            # keep existing chain plot
+            {"display": "inline"},     # show table
+            {"display": "none"},       # hide chain tab
             dash.no_update,            # no alert
             f"Vocabulary: {V}",
             f"Time: {execution_time:.4f} s",
-            False                      # close toast
+            False                      # close any open toast
         )
 
-    # ---- NATURAL-TEXT (MarkovChain) BRANCH ----
+    # ------------------------------
+    # HANDLE "Analyze natural text" BUTTON
+    # (chain_button logic remains unchanged)
+    # ------------------------------
     elif triggered_id == "chain_button":
         # Очищуємо кеш для мемоізованих функцій
         if hasattr(prepare_data, 'clear_cache'):
@@ -2222,6 +2250,9 @@ def update_table(chain_clicks, code_clicks, dataframe,
                     dash.no_update, dash.no_update, dash.no_update,
                     dash.no_update)
 
+        raw = uploaded_files.get(filename, "")
+        data = prepare_data(raw, n_size, split)
+        L = len(data)
         # Вже нема вкладки MarkovChain, тому використовуємо тільки data_table
         if definition == "dynamic":
             start = time()
