@@ -1,6 +1,8 @@
 import os
+
 os.environ['NUMBA_THREADING_LAYER'] = 'tbb'
 from numba import config
+
 config.THREADING_LAYER = 'tbb'
 
 import numbers
@@ -47,15 +49,14 @@ import tkinter as tk
 from tkinter import filedialog
 
 # ───────── Globals for Python‐file analysis ─────────
-analysis_mode   = 'text'
-current_model   = {}    # token → Ngram
-current_tokens  = []    # ordered list of tokens
-current_windows = []    # list of window‐sizes used
-python_metrics  = {}    # tok → { dt, fa_vals, fit_vals, R, a, gamma, goodness }
-current_L       = 0
+analysis_mode = 'text'
+current_model = {}  # token → Ngram
+current_tokens = []  # ordered list of tokens
+current_windows = []  # list of window‐sizes used
+python_metrics = {}  # tok → { dt, fa_vals, fit_vals, R, a, gamma, goodness }
+current_L = 0
 current_w_s_val = 1
 # ─────────────────────────────────────────────────────
-
 
 import re
 from typing import List
@@ -66,6 +67,7 @@ from string import punctuation
 
 import os, re
 from typing import List
+
 
 def tokenize_code(data: str) -> List[str]:
     """
@@ -80,7 +82,7 @@ def tokenize_code(data: str) -> List[str]:
         # --- string literals (we match them so they don't break operators) ---
         "(?:\\.|[^"\\])*"           # double-quoted
       | '(?:\\.|[^'\\])*'           # single-quoted
-      | `(?:\\.|[^`\\])*`           # backtick template
+      | (?:\\.|[^\\])*`           # backtick template
 
         # --- identifiers & keywords ---
       | [A-Za-z_$][\w$]*            # letter/underscore/$ start
@@ -107,7 +109,7 @@ def tokenize_code(data: str) -> List[str]:
 
 def tokenize_mixed_content(text: str, filename: str) -> List[str]:
     """
-    Split `text` into comment vs code spans, then:
+    Split text into comment vs code spans, then:
       - comments        → full code-tokenization (so you get //, ===, words, etc.)
       - code spans      → further split out string literals vs code
                             * string literals → natural-language words
@@ -133,14 +135,14 @@ def tokenize_mixed_content(text: str, filename: str) -> List[str]:
                 tokens.extend(tokenize_code(span))
             else:
                 # inside code, pull out string literals …
-                sub = re.split(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)',
+                sub = re.split(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|(?:\\.|[^\\])*)',
                                span, flags=re.DOTALL)
                 for ss in sub:
                     if not ss:
                         continue
                     if (ss.startswith('"') and ss.endswith('"')) \
-                    or (ss.startswith("'") and ss.endswith("'")) \
-                    or (ss.startswith('`') and ss.endswith('`')):
+                            or (ss.startswith("'") and ss.endswith("'")) \
+                            or (ss.startswith('') and ss.endswith('`')):
                         # natural text inside quotes/backticks
                         tokens.extend(nat_words(ss[1:-1]))
                     else:
@@ -158,14 +160,14 @@ def tokenize_mixed_content(text: str, filename: str) -> List[str]:
                 tokens.extend(tokenize_code(span))
             else:
                 # split out string literals
-                sub = re.split(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)',
+                sub = re.split(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|(?:\\.|[^\\])*)',
                                span, flags=re.DOTALL)
                 for ss in sub:
                     if not ss:
                         continue
                     if (ss.startswith('"') and ss.endswith('"')) \
-                    or (ss.startswith("'") and ss.endswith("'")) \
-                    or (ss.startswith('`') and ss.endswith('`')):
+                            or (ss.startswith("'") and ss.endswith("'")) \
+                            or (ss.startswith('') and ss.endswith('`')):
                         tokens.extend(nat_words(ss[1:-1]))
                     else:
                         tokens.extend(tokenize_code(ss))
@@ -176,49 +178,62 @@ def tokenize_mixed_content(text: str, filename: str) -> List[str]:
 
     return tokens
 
+def get_unique_path(path: str) -> str:
+    """
+    If `path` exists, append (1), (2), … before the extension until it's unique.
+    """
+    base, ext = os.path.splitext(path)
+    counter = 1
+    candidate = path
+    while os.path.exists(candidate):
+        candidate = f"{base}({counter}){ext}"
+        counter += 1
+    return candidate
+
 # Функція для очищення пам'яті
 def clear_memory(keep: List[str] = []):
     """
     Очищує пам'ять від великих структур даних, які більше не потрібні.
-    
+
     Args:
         keep: Список назв змінних, які потрібно зберегти
     """
     global model, df, new_ngram, data, uploaded_files, file_lengths, batch_results
-    
+
     # Зберігаємо лише необхідні дані для таблиці
     variables_to_keep = keep + ['uploaded_files', 'file_lengths', 'batch_results']
-    
+
     # Очищення великих глобальних структур даних
     if 'model' not in variables_to_keep and 'model' in globals():
         if isinstance(model, dict):
             model.clear()
         model = {}
-    
+
     # Очищення DataFrame
     if 'df' not in variables_to_keep and 'df' in globals() and df is not None:
         df = None
-    
+
     # Очищення даних тексту
     if 'data' not in variables_to_keep and 'data' in globals() and data is not None:
         data = None
-    
+
     # Очищення об'єкта newNgram
     if 'new_ngram' not in variables_to_keep and 'new_ngram' in globals() and new_ngram is not None:
         new_ngram = None
-    
+
     # Очищення кешу мемоізованих функцій
     if hasattr(prepare_data, 'clear_cache') and 'prepare_data_cache' not in variables_to_keep:
         prepare_data.clear_cache()
-    
+
     if hasattr(make_markov_chain, 'clear_cache') and 'make_markov_chain_cache' not in variables_to_keep:
         make_markov_chain.clear_cache()
-    
+
     # Додаємо агресивне очищення пам'яті за допомогою Python gc
     import gc
-    gc.collect(generation=2) # Запуск повного збирання сміття
+    gc.collect(generation=2)  # Запуск повного збирання сміття
     gc.collect(generation=1)
     gc.collect(generation=0)
+
 
 # Кешування для покращення продуктивності
 def memoize(func):
@@ -226,14 +241,14 @@ def memoize(func):
     Декоратор для кешування результатів функцій, щоб уникнути повторних обчислень.
     """
     cache = {}
-    
+
     def wrapper(*args, **kwargs):
         # Створюємо унікальний ключ на основі аргументів
         key = str(args) + str(kwargs)
         if key not in cache:
             cache[key] = func(*args, **kwargs)
         return cache[key]
-    
+
     # Додаємо функцію для очищення кешу
     wrapper.clear_cache = lambda: cache.clear()
     return wrapper
@@ -242,16 +257,16 @@ def memoize(func):
 def remove_punctuation_for_words(data):
     """
     Розбиває текст на слова та видаляє знаки пунктуації.
-    
+
     Args:
         data: Вхідний текст
-        
+
     Returns:
         List[str]: Список оброблених слів
     """
     # Використовуємо ефективніший регулярний вираз один раз
     words = re.findall(r'\b[a-zA-Z0-9]+(?:[-\'][a-zA-Z0-9]+)*\b', data.lower())
-    
+
     # Обробляємо слова з дефісами та апострофами
     result = []
     for word in words:
@@ -262,7 +277,7 @@ def remove_punctuation_for_words(data):
             result.extend([part for part in parts if part])
         else:
             result.append(word)
-    
+
     return result
 
 
@@ -278,9 +293,11 @@ def remove_punctuation(data):
             temp.append(data[i].lower())
     return "".join(temp)
 
+
 toast_visible = False
 error_visible = False
 analyze_visible = False
+
 
 class Ngram(dict):
     def __init__(self, iterable=None):  # Ініціалізували наш розподіл як новий об'єкт класу, додаємо наявні елементи
@@ -306,22 +323,22 @@ class Ngram(dict):
 def make_dataframe(model, fmin=3):
     """
     Створює DataFrame для відображення результатів аналізу.
-    
+
     Args:
         model: Словник моделі з n-грамами
         fmin: Мінімальна частота для включення n-грами в аналіз
-        
+
     Returns:
         pd.DataFrame: DataFrame з результатами
     """
     # Фільтруємо n-грами за мінімальною частотою
     filtered_data = list(
         filter(lambda x: sum(value for value in model[x].values() if isinstance(value, int)) >= fmin, model))
-    
+
     # Додаємо new_ngram, якщо вона існує в моделі
     if 'new_ngram' not in filtered_data and 'new_ngram' in model:
         filtered_data.append("new_ngram")
-        
+
     # Створюємо структуру даних для DataFrame
     data = {"ngram": [],
             "F": np.empty(len(filtered_data), dtype=np.dtype(int))}
@@ -349,30 +366,30 @@ def make_dataframe(model, fmin=3):
 def make_markov_chain(data: List, order: int = 1) -> Dict[str, Ngram]:
     """
     Створює ланцюг Маркова з вхідних даних.
-    
+
     Args:
         data: Список елементів для побудови ланцюга Маркова
         order: Порядок ланцюга Маркова (кількість попередніх елементів для прогнозу)
-        
+
     Returns:
         Dict[str, Ngram]: Модель ланцюга Маркова у вигляді словника n-грам
     """
     global model, L, V
-    
+
     # Створюємо новий словник моделі
     model = dict()
     L = len(data) - order
-    
+
     # Ініціалізуємо спеціальну n-граму для нових елементів
     model['new_ngram'] = Ngram()
     model['new_ngram'].bool = np.zeros(L, dtype=np.uint8)  # використовуємо uint8 для зменшення пам'яті
     model['new_ngram'].pos = []
-    
+
     # Використовуємо більш ефективний алгоритм для побудови ланцюга Маркова
     if order > 1:
         for i in range(L - 1):
             window = tuple(data[i: i + order])  # Додаємо в словник
-            
+
             if window in model:  # Приєднуємо до вже існуючого розподілу
                 model[window].update([data[i + order]])
                 model[window].pos.append(i + 1)
@@ -388,22 +405,22 @@ def make_markov_chain(data: List, order: int = 1) -> Dict[str, Ngram]:
     else:
         # Попередньо визначаємо множину унікальних елементів для оптимізації
         unique_items = set(data)
-        
+
         # Ініціалізуємо модель для кожного унікального елемента
         for item in unique_items:
             model[item] = Ngram()
             model[item].pos = []
             model[item].bool = np.zeros(L, dtype=np.uint8)
-        
+
         # Заповнюємо модель
         for i in range(L):
             item = data[i]
             next_item = data[i + order]
-            
+
             model[item].update([next_item])
             model[item].pos.append(i + order)
             model[item].bool[i] = 1
-            
+
             if i == 0:  # Перший елемент
                 model['new_ngram'].bool[i] = 1
                 model['new_ngram'].pos.append(i + order)
@@ -413,10 +430,10 @@ def make_markov_chain(data: List, order: int = 1) -> Dict[str, Ngram]:
         if data[L] not in model[data[L]].pos:
             model[data[L]].pos.append(L + order)
             model[data[L]].bool = np.zeros(L, dtype=np.uint8)
-            model[data[L]].bool[L-1] = 1
-        
+            model[data[L]].bool[L - 1] = 1
+
         model[data[0]].update([data[L]])
-        
+
     V = len(model)
     return model
 
@@ -424,22 +441,22 @@ def make_markov_chain(data: List, order: int = 1) -> Dict[str, Ngram]:
 def calculate_distance(positions: np.ndarray, L: int, option: str, ngram: str, min_dist: int = 1) -> np.ndarray:
     """
     Розраховує відстані між позиціями елементів з урахуванням граничних умов.
-    
+
     Оптимізована для роботи з великими наборами даних за допомогою паралельної обробки.
-    
+
     Args:
         positions: Масив позицій елементів
         L: Довжина тексту
         option: Тип граничних умов ("no", "ordinary", "periodic")
         ngram: Назва n-грами
         min_dist: Мінімальна відстань (0 або 1)
-        
+
     Returns:
         np.ndarray: Масив відстаней між елементами
     """
     # Оптимізуємо обробку масиву позицій
     positions = np.array(positions, dtype=np.int32)
-    
+
     # Переконуємося, що min_dist є цілим числом
     if not isinstance(min_dist, int):
         try:
@@ -447,7 +464,7 @@ def calculate_distance(positions: np.ndarray, L: int, option: str, ngram: str, m
         except (ValueError, TypeError):
             print(f"Warning: min_dist '{min_dist}' is not an integer. Using default min_dist=1")
             min_dist = 1
-    
+
     # Використовуємо оптимізовані функції відповідно до граничних умов
     if option == "no":
         distances = nbc(positions, L, min_dist)
@@ -455,7 +472,7 @@ def calculate_distance(positions: np.ndarray, L: int, option: str, ngram: str, m
         distances = pbc(positions, L, min_dist)
     else:  # "ordinary"
         distances = obc(positions, L, min_dist)
-    
+
     return distances
 
 
@@ -463,25 +480,25 @@ def calculate_distance(positions: np.ndarray, L: int, option: str, ngram: str, m
 def nbc(pos, L, min_dist=1):
     """
     Обчислює відстані без граничних умов.
-    
+
     Оптимізовано за допомогою Numba JIT з паралельною обробкою.
-    
+
     Args:
         pos: Масив позицій елементів
         L: Довжина послідовності
         min_dist: Мінімальна відстань
-        
+
     Returns:
         np.ndarray: Масив відстаней
     """
     n = len(pos)
     dt = np.zeros(n - 1, dtype=np.int32)
-    
+
     for i in prange(n - 1):
         dt[i] = pos[i + 1] - pos[i]
-        if min_dist==0:
+        if min_dist == 0:
             dt[i] -= 1
-    
+
     return dt
 
 
@@ -489,34 +506,34 @@ def nbc(pos, L, min_dist=1):
 def pbc(pos, L, min_dist=1):
     """
     Обчислює відстані з періодичними граничними умовами.
-    
+
     Оптимізовано за допомогою Numba JIT з паралельною обробкою.
-    
+
     Args:
         pos: Масив позицій елементів
         L: Довжина послідовності
         min_dist: Мінімальна відстань
-        
+
     Returns:
         np.ndarray: Масив відстаней
     """
     n = len(pos)
     dt = np.zeros(n, dtype=np.int32)
-    
+
     for i in prange(n - 1):
         dt[i] = pos[i + 1] - pos[i]
         if dt[i] > L // 2:
             dt[i] = L - dt[i]
-        if min_dist==0:
+        if min_dist == 0:
             dt[i] -= -1
-    
+
     # Останній елемент обчислюємо окремо через періодичність
     dt[n - 1] = L - pos[n - 1] + pos[0]
     if dt[n - 1] > L // 2:
         dt[n - 1] = L - dt[n - 1]
-    if min_dist==0:
+    if min_dist == 0:
         dt[n - 1] -= 1
-    
+
     return dt
 
 
@@ -524,32 +541,32 @@ def pbc(pos, L, min_dist=1):
 def obc(pos, L, min_dist=1):
     """
     Обчислює відстані зі звичайними граничними умовами.
-    
+
     Оптимізовано за допомогою Numba JIT з паралельною обробкою.
-    
+
     Args:
         pos: Масив позицій елементів
         L: Довжина послідовності
         min_dist: Мінімальна відстань
-        
+
     Returns:
         np.ndarray: Масив відстаней
     """
     n = len(pos)
     dt = np.zeros(n, dtype=np.int32)
-    
+
     for i in prange(n - 1):
         dt[i] = pos[i + 1] - pos[i]
-        if min_dist==0:
+        if min_dist == 0:
             dt[i] -= 1
-    
+
     # Останній елемент обчислюємо окремо
     dt[n - 1] = L - pos[n - 1] + pos[0]
     if dt[n - 1] < min_dist:
         dt[n - 1] = min_dist
-    if min_dist==0:
+    if min_dist == 0:
         dt[n - 1] -= 1
-    
+
     return dt
 
 
@@ -557,10 +574,10 @@ def obc(pos, L, min_dist=1):
 def s(window: np.ndarray) -> int:
     """
     Обчислює суму значень вікна.
-    
+
     Args:
         window: Масив значень
-        
+
     Returns:
         int: Сума значень
     """
@@ -572,16 +589,16 @@ def s(window: np.ndarray) -> int:
 def mse(x: np.ndarray) -> float:
     """
     Обчислює середньоквадратичну похибку (MSE) набору значень.
-    
+
     Args:
         x: Масив значень
-        
+
     Returns:
         float: Значення MSE
     """
     if len(x) == 0:
         return 0.0
-        
+
     # Оптимізоване обчислення MSE
     mean_x = np.mean(x)
     return np.sqrt(np.mean((x - mean_x) ** 2))
@@ -591,16 +608,16 @@ def mse(x: np.ndarray) -> float:
 def R(x: np.ndarray) -> float:
     """
     Обчислює коефіцієнт варіації.
-    
+
     Args:
         x: Масив значень
-        
+
     Returns:
         float: Значення коефіцієнта варіації
     """
     if len(x) <= 1:
         return 0.0
-        
+
     # Оптимізоване обчислення коефіцієнта варіації
     mean_x = np.mean(x)
     if mean_x == 0:  # Запобігаємо діленню на нуль
@@ -619,16 +636,17 @@ def calc_non_overlapping_shift(k, min_window, window_expansion):
     if k == 1:
         return min_window
     else:
-        return min_window + (k-1) * window_expansion
+        return min_window + (k - 1) * window_expansion
+
 
 @njit(fastmath=True)
-def make_windows(x: np.ndarray, wi: int, l: int, wsh: int, 
-                overlap_mode: str = "overlapping", 
-                min_window: Optional[int] = None, 
-                window_expansion: Optional[int] = None) -> np.ndarray:
+def make_windows(x: np.ndarray, wi: int, l: int, wsh: int,
+                 overlap_mode: str = "overlapping",
+                 min_window: Optional[int] = None,
+                 window_expansion: Optional[int] = None) -> np.ndarray:
     """
     Створює вікна для аналізу даних.
-    
+
     Args:
         x: Вхідний масив даних
         wi: Розмір вікна
@@ -637,7 +655,7 @@ def make_windows(x: np.ndarray, wi: int, l: int, wsh: int,
         overlap_mode: Режим перекриття вікон ("overlapping" або "non-overlapping")
         min_window: Мінімальний розмір вікна для режиму non-overlapping
         window_expansion: Значення розширення вікна для режиму non-overlapping
-        
+
     Returns:
         np.ndarray: Масив сум у вікнах
     """
@@ -646,23 +664,23 @@ def make_windows(x: np.ndarray, wi: int, l: int, wsh: int,
         # Визначаємо кількість вікон заздалегідь для уникнення повторного обчислення
         num_windows = (l - wi) // wsh + 1
         sums = np.zeros(num_windows, dtype=np.float64)
-        
+
         # Використовуємо ефективніший цикл
         for i in range(num_windows):
             start_idx = i * wsh
             end_idx = start_idx + wi
             # Використовуємо вбудовану функцію sum у NumPy
             sums[i] = np.sum(x[start_idx:end_idx])
-            
+
     else:  # non-overlapping режим
         # Використовуємо правильні значення за замовчуванням
         min_win = wi if min_window is None else min_window
         win_exp = wi if window_expansion is None else window_expansion
-        
+
         # Визначаємо кількість вікон
         num_windows = (l - wi) // wi + 1
         sums = np.zeros(num_windows, dtype=np.float64)
-        
+
         # Використовуємо ефективніший цикл для non-overlapping
         for i in range(num_windows):
             start_idx = i * wi
@@ -670,7 +688,7 @@ def make_windows(x: np.ndarray, wi: int, l: int, wsh: int,
             if end_idx > l:
                 end_idx = l
             sums[i] = np.sum(x[start_idx:end_idx])
-    
+
     return sums
 
 
@@ -691,24 +709,24 @@ def fit(x, a, b):
 def prepare_data(data: str, n: int, split: str) -> List:
     """
     Підготовка даних для аналізу, розбиття на n-грами залежно від вказаних параметрів.
-    
+
     Args:
         data: Вхідний текст для обробки
         n: Розмір n-грами
         split: Метод розбиття тексту ("word", "letter", "symbol")
-        
+
     Returns:
         List: Список підготовлених даних
     """
     global L
     if n is None:
         return dash.no_update
-    
+
     # Використовуємо спільний код попередньої обробки для всіх типів
     data = re.sub(r'\n+', '\n', data)
     data = re.sub(r'\n\s\s', '\n', data)
     data = re.sub(r'﻿', '', data)
-    
+
     # Для n=1 (одиничні елементи)
     if n == 1:
         if split == "word":
@@ -719,7 +737,7 @@ def prepare_data(data: str, n: int, split: str) -> List:
             result = processor.get_words()
             L = len(result)
             return result
-            
+
         elif split == 'letter':
             # Обробка для літер і чисел
             temp = []
@@ -731,7 +749,7 @@ def prepare_data(data: str, n: int, split: str) -> List:
                     temp.append(i)
             L = len(temp)
             return temp
-            
+
         elif split == 'symbol':
             # Обробка для символів
             result = []
@@ -742,7 +760,7 @@ def prepare_data(data: str, n: int, split: str) -> List:
                     result.append(char.lower())
             L = len(result)
             return result
-    
+
     # Для n>1 (n-грами)
     else:
         if split == "word":
@@ -752,15 +770,15 @@ def prepare_data(data: str, n: int, split: str) -> List:
             processor.preprocess(data)
             words = processor.get_words()
             L = len(words)
-            
+
             # Створюємо n-грами з слів
             result = []
             for i in range(L - n + 1):
                 window = tuple(words[i:i + n])
                 result.append(window)
-            
+
             return result
-                
+
         elif split == "letter":
             # Обробка для n-грам літер і чисел
             temp = []
@@ -777,7 +795,7 @@ def prepare_data(data: str, n: int, split: str) -> List:
                 window = tuple(data[i:i + n])
                 temp.append(window)
             return temp
-                
+
         elif split == 'symbol':
             # Обробка для n-грам символів
             temp = []
@@ -796,30 +814,31 @@ def prepare_data(data: str, n: int, split: str) -> List:
 
     return []
 
-def dfa(data: List, args: Tuple[int, int, int], 
-       overlap_mode: str = "overlapping", 
-       min_window: Optional[int] = None, 
-       window_expansion: Optional[int] = None) -> np.ndarray:
+
+def dfa(data: List, args: Tuple[int, int, int],
+        overlap_mode: str = "overlapping",
+        min_window: Optional[int] = None,
+        window_expansion: Optional[int] = None) -> np.ndarray:
     """
     Виконує аналіз флуктуацій (DFA) для даних.
-    
+
     Args:
         data: Вхідні дані для аналізу
         args: Кортеж (розмір вікна, зсув вікна, довжина даних)
         overlap_mode: Режим перекриття вікон ("overlapping" або "non-overlapping")
         min_window: Мінімальний розмір вікна для режиму non-overlapping
         window_expansion: Значення розширення вікна для режиму non-overlapping
-        
+
     Returns:
         np.ndarray: Масив результатів DFA аналізу
     """
     wi, wh, l = args
-    
+
     if overlap_mode == "overlapping":
         # Стандартний режим з фіксованим зміщенням
         window_count = len(range(0, l - wi, wh))
         count = np.zeros(window_count, dtype=np.uint8)
-        
+
         for index, i in enumerate(range(0, l - wi, wh)):
             temp_v = []
             x = []
@@ -836,7 +855,7 @@ def dfa(data: List, args: Tuple[int, int, int],
             min_window = wh
         if window_expansion is None:
             window_expansion = wh
-            
+
         # Оцінюємо кількість і розташування вікон
         k = 1
         i = 0
@@ -846,7 +865,7 @@ def dfa(data: List, args: Tuple[int, int, int],
             shift = calc_non_overlapping_shift(k, min_window, window_expansion)
             i += shift
             k += 1
-            
+
         count = np.zeros(len(window_positions), dtype=np.uint8)
         for index, i in enumerate(window_positions):
             temp_v = []
@@ -858,7 +877,7 @@ def dfa(data: List, args: Tuple[int, int, int],
                     temp_v.append(ngram)
                     x.append(1)
             count[index] = s(np.array(x, dtype=np.uint8))
-    
+
     return count
 
 
@@ -875,7 +894,7 @@ class newNgram():
             window_expansion = self.wh
         count = dfa(self.data, (w, self.wh, self.l), overlap_mode, min_window, window_expansion)
         self.count[w] = count
-        self.dfa[w] = float(mse(count)) # Окремо обчислюємо MSE для count
+        self.dfa[w] = float(mse(count))  # Окремо обчислюємо MSE для count
 
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
@@ -909,8 +928,8 @@ layout1 = html.Div([
                                 # FILE SECTION
                                 html.Div([
                                     html.H6("File Selection",
-                                           className="text-primary text-center mb-2",
-                                           style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
+                                            className="text-primary text-center mb-2",
+                                            style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
 
                                     html.Label("Upload file:"),
                                     html.Div(
@@ -920,7 +939,8 @@ layout1 = html.Div([
                                                 id='upload-data',
                                                 children=html.Div([
                                                     'Drag and Drop or ',
-                                                    html.A('Select Files', style={'fontWeight': 'bold', 'color': '#007bff'})
+                                                    html.A('Select Files',
+                                                           style={'fontWeight': 'bold', 'color': '#007bff'})
                                                 ]),
                                                 style={
                                                     'width': '100%',
@@ -945,7 +965,8 @@ layout1 = html.Div([
                                                         id='file-selector',
                                                         options=[],
                                                         placeholder="Select a file to analyze",
-                                                        style={"minWidth": "250px", "maxWidth": "100%", "whiteSpace": "nowrap", "textOverflow": "ellipsis"}
+                                                        style={"minWidth": "250px", "maxWidth": "100%",
+                                                               "whiteSpace": "nowrap", "textOverflow": "ellipsis"}
                                                     )
                                                 ],
                                                 size="md",
@@ -953,20 +974,22 @@ layout1 = html.Div([
                                                 style={"marginBottom": "10px"}
                                             ),
                                         ]),
-                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee", "paddingBottom": "10px"}),
+                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee",
+                                          "paddingBottom": "10px"}),
 
                                 # ANALYSIS PARAMETERS SECTION
                                 html.Div([
-                                    html.H6("Analysis Parameters", 
-                                           className="text-primary text-center mb-2", 
-                                           style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
-                                    
+                                    html.H6("Analysis Parameters",
+                                            className="text-primary text-center mb-2",
+                                            style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
+
                                     dbc.InputGroup(
                                         [
                                             dbc.InputGroupText("Size of ngram"),
-                                            dbc.Input(id="n_size", type="number", value=1, style={"font-weight": "bold"})
-                                        ], 
-                                        size="md", 
+                                            dbc.Input(id="n_size", type="number", value=1,
+                                                      style={"font-weight": "bold"})
+                                        ],
+                                        size="md",
                                         className="mb-2"
                                     ),
                                     dbc.InputGroup(
@@ -981,8 +1004,8 @@ layout1 = html.Div([
                                                 ],
                                                 value="word"
                                             )
-                                        ], 
-                                        size="md", 
+                                        ],
+                                        size="md",
                                         className="mb-2"
                                     ),
                                     dbc.InputGroup(
@@ -997,10 +1020,10 @@ layout1 = html.Div([
                                                 value="no",
                                                 style={"font-weight": "bold"}
                                             ),
-                                    dbc.InputGroupText("Boundary Condition:")
-                                ], 
-                                size="md", 
-                                className="mb-2"
+                                            dbc.InputGroupText("Boundary Condition:")
+                                        ],
+                                        size="md",
+                                        className="mb-2"
                                     ),
                                     dbc.InputGroup([
                                         dbc.InputGroupText("Min Tau:"),
@@ -1017,18 +1040,20 @@ layout1 = html.Div([
                                     dbc.InputGroup(
                                         [
                                             dbc.InputGroupText("filter"),
-                                            dbc.Input(id="f_min", type="number", value=3, min=1, style={"font-weight": "bold"})
+                                            dbc.Input(id="f_min", type="number", value=3, min=1,
+                                                      style={"font-weight": "bold"})
                                         ],
                                         className="mb-3"
                                     ),
-                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee", "paddingBottom": "10px"}),
-                                
+                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee",
+                                          "paddingBottom": "10px"}),
+
                                 # WINDOW SETTINGS SECTION
                                 html.Div([
                                     html.H6("Sliding Window Settings",
                                             className="text-primary text-center mb-2",
                                             style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
-                                    
+
                                     dbc.InputGroup(
                                         [
                                             dbc.Select(
@@ -1042,7 +1067,7 @@ layout1 = html.Div([
                                             dbc.InputGroupText("Window Mode"),
                                         ], size="md", className="mb-2"
                                     ),
-                                    
+
                                     dbc.InputGroup(
                                         [
                                             dbc.Select(
@@ -1068,78 +1093,95 @@ layout1 = html.Div([
                                             html.Span("w_e = Window Expansion", style={"fontWeight": "bold"}), " | ",
                                             html.Span("w_max = Max Window", style={"fontWeight": "bold"})
                                         ], className="text-muted mb-2 d-block text-center"),
-                                    ], style={"background": "#f0f8ff", "padding": "6px", "borderRadius": "5px", "marginBottom": "10px"}),
+                                    ], style={"background": "#f0f8ff", "padding": "6px", "borderRadius": "5px",
+                                              "marginBottom": "10px"}),
 
                                     dbc.InputGroup([
-                                        dbc.InputGroupText(html.Span(["Min", html.Br(), "Window"], style={"lineHeight": "1.2", "textAlign": "center"}),
-                                                         style={"width": "90px", "background-color": "#e9f5fe"}),
+                                        dbc.InputGroupText(html.Span(["Min", html.Br(), "Window"],
+                                                                     style={"lineHeight": "1.2",
+                                                                            "textAlign": "center"}),
+                                                           style={"width": "90px", "background-color": "#e9f5fe"}),
                                         dbc.Input(id="w_min", type="number", style={"font-weight": "bold"}),
                                     ], className="mb-2"),
-                                    
+
                                     dbc.InputGroup([
-                                        dbc.InputGroupText(html.Span(["Window", html.Br(), "Shift"], style={"lineHeight": "1.2", "textAlign": "center"}),
-                                                         style={"width": "90px", "background-color": "#e9f5fe"}),
+                                        dbc.InputGroupText(html.Span(["Window", html.Br(), "Shift"],
+                                                                     style={"lineHeight": "1.2",
+                                                                            "textAlign": "center"}),
+                                                           style={"width": "90px", "background-color": "#e9f5fe"}),
                                         dbc.Input(id="w_s", type="number", style={"font-weight": "bold"}),
                                     ], className="mb-2"),
-                                    
+
                                     dbc.InputGroup([
-                                        dbc.InputGroupText(html.Span(["Window", html.Br(), "Expansion"], style={"lineHeight": "1.2", "textAlign": "center"}),
-                                                         style={"width": "90px", "background-color": "#e9f5fe"}),
+                                        dbc.InputGroupText(html.Span(["Window", html.Br(), "Expansion"],
+                                                                     style={"lineHeight": "1.2",
+                                                                            "textAlign": "center"}),
+                                                           style={"width": "90px", "background-color": "#e9f5fe"}),
                                         dbc.Input(id="w_e", type="number", style={"font-weight": "bold"}),
                                     ], className="mb-2"),
-                                    
+
                                     dbc.InputGroup([
-                                        dbc.InputGroupText(html.Span(["Max", html.Br(), "Window"], style={"lineHeight": "1.2", "textAlign": "center"}),
-                                                         style={"width": "90px", "background-color": "#e9f5fe"}),
+                                        dbc.InputGroupText(html.Span(["Max", html.Br(), "Window"],
+                                                                     style={"lineHeight": "1.2",
+                                                                            "textAlign": "center"}),
+                                                           style={"width": "90px", "background-color": "#e9f5fe"}),
                                         dbc.Input(id="w_max", type="number", style={"font-weight": "bold"}),
                                     ], className="mb-3"),
-                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee", "paddingBottom": "10px"}),
+                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee",
+                                          "paddingBottom": "10px"}),
 
                                 # ACTION BUTTONS SECTION
                                 html.Div([
-                                    html.H6("Actions", 
-                                           className="text-primary text-center mb-2", 
-                                           style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
-                                    
+                                    html.H6("Actions",
+                                            className="text-primary text-center mb-2",
+                                            style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
+
                                     dbc.Button("Analyze natural text", id="chain_button", color="primary",
-                                              className="w-100 mb-2", 
-                                              style={"fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}, 
-                                              disabled=analyze_visible),
-                                    dbc.Button("Analyze code", id="analyze_code", color="secondary", className="w-100 mb-2"),
-                                    dbc.Button("Save data", id="save", color="danger", 
-                                              className="w-100",
-                                              style={"fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
+                                               className="w-100 mb-2",
+                                               style={"fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"},
+                                               disabled=analyze_visible),
+                                    dbc.Button("Analyze code", id="analyze_code", color="secondary",
+                                               className="w-100 mb-2"),
+                                    dbc.Button("Save data", id="save", color="danger",
+                                               className="w-100",
+                                               style={"fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
                                     html.Div(id="temp_seve",
                                              children=[]
                                              ),
-                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee", "paddingBottom": "10px"}),
+                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee",
+                                          "paddingBottom": "10px"}),
 
                                 # BATCH PROCESSING SECTION
                                 html.Div([
-                                    html.H6("Batch Processing", 
-                                           className="text-primary text-center mb-2", 
-                                           style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
+                                    html.H6("Batch Processing",
+                                            className="text-primary text-center mb-2",
+                                            style={"background": "#f8f9fa", "padding": "6px", "border-radius": "5px"}),
                                     # Add the min-max info Div here
-                                    html.Div(id='min-max-length-info', style={"marginTop": "5px", "fontSize": "small", "textAlign": "center", "marginBottom": "10px"}),
-                                    
+                                    html.Div(id='min-max-length-info',
+                                             style={"marginTop": "5px", "fontSize": "small", "textAlign": "center",
+                                                    "marginBottom": "10px"}),
+
                                     dbc.InputGroup(
                                         [
                                             dbc.InputGroupText("Lmin: Fmin1"),
-                                            dbc.Input(id="fmin1", type="number", value=3, min=1, style={"font-weight": "bold"})
+                                            dbc.Input(id="fmin1", type="number", value=3, min=1,
+                                                      style={"font-weight": "bold"})
                                         ],
                                         style={'marginBottom': '5px'}
                                     ),
                                     dbc.InputGroup(
                                         [
                                             dbc.InputGroupText("Lmax: Fmin2"),
-                                            dbc.Input(id="fmin2", type="number", value=5, min=1, style={"font-weight": "bold"})
+                                            dbc.Input(id="fmin2", type="number", value=5, min=1,
+                                                      style={"font-weight": "bold"})
                                         ],
                                         style={'marginBottom': '5px'}
                                     ),
                                     # Add batch window settings options
                                     dbc.Collapse(
                                         [
-                                            html.H6("Batch Window Settings", style={'marginTop': '10px', 'fontSize': '14px'}),
+                                            html.H6("Batch Window Settings",
+                                                    style={'marginTop': '10px', 'fontSize': '14px'}),
                                             dbc.InputGroup(
                                                 [
                                                     dbc.Select(
@@ -1158,9 +1200,10 @@ layout1 = html.Div([
                                         id="batch_window_controls",
                                         is_open=True
                                     ),
-                                    dbc.Button("Process All Files", id="batch_process", color="success", 
-                                              className="w-100", 
-                                              style={'marginBottom': '10px', "fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
+                                    dbc.Button("Process All Files", id="batch_process", color="success",
+                                               className="w-100",
+                                               style={'marginBottom': '10px', "fontWeight": "bold",
+                                                      "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
                                     dbc.Button(
                                         "Process All Code Files",
                                         id="batch_process_code",
@@ -1168,11 +1211,13 @@ layout1 = html.Div([
                                         className="w-100 mb-2"
                                     ),
                                     dbc.Button("Save Batch Results", id="save_batch", color="primary",
-                                              className="w-100",
-                                              style={'marginBottom': '10px', "fontWeight": "bold", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
+                                               className="w-100",
+                                               style={'marginBottom': '10px', "fontWeight": "bold",
+                                                      "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}),
                                     html.Div(id="temp_seve_batch", style={'marginBottom': '10px'}),
-                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee", "paddingBottom": "10px"}),
-                                
+                                ], style={"marginBottom": "15px", "borderBottom": "1px solid #eee",
+                                          "paddingBottom": "10px"}),
+
                                 html.Div(id="alert", children=[])
                                 # html.H6("Boundary Condition:"),
                                 # dcc.RadioItems(id='condition',options=[{"label":"no","value":"no"},{"label":"periodic","value":"periodic"},{"label":"ordinary","value":"ordinary"}],value="words"),
@@ -1191,7 +1236,8 @@ layout1 = html.Div([
                             dbc.CardHeader(
                                 dbc.Tabs(
                                     [
-                                        dbc.Tab(label="DataTable", tab_id="data_table", label_style={"font-weight": "bold"})
+                                        dbc.Tab(label="DataTable", tab_id="data_table",
+                                                label_style={"font-weight": "bold"})
                                     ],
                                     id="dataframe",
                                     active_tab="data_table"
@@ -1245,15 +1291,22 @@ layout1 = html.Div([
                                              style={"display": "none"},
                                              children=[dbc.Spinner(dcc.Graph(id="chain", style={"height": "400px"}))]),
 
-                                    dbc.CardHeader("Characteristics", style={"padding": "5px 20px", "background-color": "#f0f8ff", "font-weight": "bold"}),
+                                    dbc.CardHeader("Characteristics",
+                                                   style={"padding": "5px 20px", "background-color": "#f0f8ff",
+                                                          "font-weight": "bold"}),
                                     # here add chars
                                     dbc.CardBody(
                                         dbc.Row([
                                             # NOTE додала вивід 8-ми значень з екселю а також кнопку для копіювання всього
                                             dbc.Col([
-                                                html.Div(["Length: "], id="l", style={"whiteSpace": "nowrap", "width": "100%", "overflow": "hidden", "textOverflow": "ellipsis", "fontWeight": "bold", "padding": "3px"}),
-                                                html.Div(["Vocabulary: "], id="v", style={"fontWeight": "bold", "padding": "3px"}),
-                                                html.Div(["Time: "], id="t", style={"fontWeight": "bold", "padding": "3px"})
+                                                html.Div(["Length: "], id="l",
+                                                         style={"whiteSpace": "nowrap", "width": "100%",
+                                                                "overflow": "hidden", "textOverflow": "ellipsis",
+                                                                "fontWeight": "bold", "padding": "3px"}),
+                                                html.Div(["Vocabulary: "], id="v",
+                                                         style={"fontWeight": "bold", "padding": "3px"}),
+                                                html.Div(["Time: "], id="t",
+                                                         style={"fontWeight": "bold", "padding": "3px"})
 
                                             ], width={"size": 5}),
                                             dbc.Col([
@@ -1271,7 +1324,10 @@ layout1 = html.Div([
                                             dbc.Col([
                                                 html.Div([""], id="new_output7", n_clicks=0, style={"padding": "3px"}),
                                                 html.Div([""], id="new_output8", n_clicks=0, style={"padding": "3px"}),
-                                                html.Div([""], id="copy_all", n_clicks=0, style={"fontWeight": "bold", "color": "#007bff", "cursor": "pointer", "textDecoration": "underline", "padding": "3px"})
+                                                html.Div([""], id="copy_all", n_clicks=0,
+                                                         style={"fontWeight": "bold", "color": "#007bff",
+                                                                "cursor": "pointer", "textDecoration": "underline",
+                                                                "padding": "3px"})
                                             ], width={"size": 1}),
                                         ])
                                     ),
@@ -1321,7 +1377,8 @@ layout1 = html.Div([
                                     ], id="batch_results_container", style={"display": "none"})
                                 ]
                             )
-                        ], style={"padding": "0", "margin-right": "0px", "margin-top": "10px", "height": "auto", "minHeight": "650px"}),
+                        ], style={"padding": "0", "margin-right": "0px", "margin-top": "10px", "height": "auto",
+                                  "minHeight": "650px"}),
                 ],
                 width={"size": 9, "padding": 0}
             ),
@@ -1340,8 +1397,8 @@ layout1 = html.Div([
                                 ],
                                 id='card-tabs1',
                                 active_tab="tab1"
-                                #active_tab="tab1",
-                                #card=True
+                                # active_tab="tab1",
+                                # card=True
                             )
                         ),
                         dbc.CardBody([
@@ -1366,8 +1423,8 @@ layout1 = html.Div([
                                 ],
                                 id='card-tabs',
                                 active_tab="tab2"
-                                #active_tab="tab2",
-                                #card=True
+                                # active_tab="tab2",
+                                # card=True
                             )
                         ),
                         dbc.CardBody([
@@ -1380,7 +1437,8 @@ layout1 = html.Div([
                                 value="linear",
                                 labelStyle={"marginRight": "15px", "fontWeight": "bold"},
                                 inputStyle={"marginRight": "5px"},
-                                style={"marginBottom": "10px", "backgroundColor": "#f8f9fa", "padding": "8px", "borderRadius": "5px"}
+                                style={"marginBottom": "10px", "backgroundColor": "#f8f9fa", "padding": "8px",
+                                       "borderRadius": "5px"}
                             ),
                             dcc.Graph(id="fa", config={'displayModeBar': True, 'displaylogo': False})
 
@@ -1427,13 +1485,14 @@ from concurrent.futures import ThreadPoolExecutor
 import numba
 import os
 
+
 def is_number(s: str) -> bool:
     """
     Перевіряє, чи можна рядок перетворити в число.
-    
+
     Args:
         s: Рядок для перевірки
-        
+
     Returns:
         bool: True, якщо рядок може бути перетворений у число, інакше False
     """
@@ -1443,46 +1502,49 @@ def is_number(s: str) -> bool:
     except (ValueError, TypeError):
         return False
 
+
 # NOTE клас із С# для обробки слів
 class NgrammProcessor:
     """
     Клас для обробки тексту і отримання n-грам.
     """
+
     def __init__(self, ignore_punctuation: bool = True):
         """
         Ініціалізує процесор n-грам.
-        
+
         Args:
             ignore_punctuation: Чи ігнорувати пунктуацію при обробці
         """
         self.ignore_punctuation = ignore_punctuation
         self.words = []
         self.processed_text = ""
-        
+
     def preprocess(self, text: str) -> None:
         """
         Попередня обробка тексту.
-        
+
         Args:
             text: Вхідний текст для обробки
         """
         # Видаляємо пунктуацію, якщо потрібно
         if self.ignore_punctuation:
             # Використовуємо оптимізований метод видалення пунктуації
-            self.processed_text = ''.join(char for char in text if char not in punctuation or char == '-' or char == "'")
+            self.processed_text = ''.join(
+                char for char in text if char not in punctuation or char == '-' or char == "'")
         else:
             self.processed_text = text
-            
+
         # Розбиваємо текст на слова
         self.words = [word.lower() for word in re.findall(r'\b\w+(?:[-\']\w+)*\b', self.processed_text)]
-        
+
     def get_words(self, remove_empty_entries: bool = False) -> List[str]:
         """
         Отримує список слів із обробленого тексту.
-        
+
         Args:
             remove_empty_entries: Чи видаляти порожні рядки
-            
+
         Returns:
             List[str]: Список слів
         """
@@ -1527,12 +1589,12 @@ def update_upload_status(contents, filenames, n_size, split_mode):
             lengths = [file_lengths[fn].get(split_mode, 0)
                        for fn in file_lengths]
             if lengths:
-                split_label = "letters&numbers" if split_mode=='letter' else f"{split_mode}s"
+                split_label = "letters&numbers" if split_mode == 'letter' else f"{split_mode}s"
                 min_max_info = f"Min/Max Length ({split_label}): {min(lengths)} / {max(lengths)}"
         return html.Div("No new files uploaded"), options, html.Div(min_max_info)
 
     success_count = 0
-    error_count   = 0
+    error_count = 0
 
     for content, filename in zip(contents, filenames):
         try:
@@ -1549,7 +1611,7 @@ def update_upload_status(contents, filenames, n_size, split_mode):
                     | (\"\"\".*?\"\"\"     )  # triple-quoted double
                     | (\'\'\'.*?\'\'\'     )  # triple-quoted single
                     """,
-                    re.MULTILINE|re.DOTALL|re.VERBOSE
+                    re.MULTILINE | re.DOTALL | re.VERBOSE
                 )
                 last = 0
                 for m in token_re.finditer(raw):
@@ -1613,8 +1675,8 @@ def update_upload_status(contents, filenames, n_size, split_mode):
     # summary message
     summary = html.Div([
         html.H5("Upload Summary:"),
-        html.P(f"Successfully uploaded: {success_count}", style={'color':'green'}),
-        html.P(f"Errors: {error_count}", style={'color':'red' if error_count else 'green'})
+        html.P(f"Successfully uploaded: {success_count}", style={'color': 'green'}),
+        html.P(f"Errors: {error_count}", style={'color': 'red' if error_count else 'green'})
     ])
 
     # rebuild selector options
@@ -1626,7 +1688,7 @@ def update_upload_status(contents, filenames, n_size, split_mode):
         lengths = [file_lengths[fn].get(split_mode, 0)
                    for fn in file_lengths]
         if lengths:
-            split_label = "letters&numbers" if split_mode=='letter' else f"{split_mode}s"
+            split_label = "letters&numbers" if split_mode == 'letter' else f"{split_mode}s"
             min_max_info = f"Min/Max Length ({split_label}): {min(lengths)} / {max(lengths)}"
 
     return summary, options, html.Div(min_max_info)
@@ -1646,13 +1708,13 @@ def update_upload_status(contents, filenames, n_size, split_mode):
 )
 def process_selected_file(selected_filename, split, definition, n):
     global L, data, length_updated
-    
+
     if selected_filename is None or selected_filename not in uploaded_files:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
-    
+
     file = uploaded_files[selected_filename]
     length_updated = False
-    
+
     # Calculate L based on split type (dynamic or static handles data differently)
     if definition == "dynamic":
         data = prepare_data(file, n, split)
@@ -1693,13 +1755,13 @@ def process_selected_file(selected_filename, split, definition, n):
         w_max = int(L / 20)
         w_min = int(w_max / 20)
         length_updated = True
-    
+
     # Format the lengths into a multi-line Div
     length_elements = [html.Strong("Length:")]
-    
+
     # Get all lengths from the stored dictionary
     lengths = file_lengths[selected_filename]
-    
+
     # Add each length type on a new line
     if 'word' in lengths:
         length_elements.append(html.Div(f"words: {lengths['word']}"))
@@ -1707,27 +1769,28 @@ def process_selected_file(selected_filename, split, definition, n):
         length_elements.append(html.Div(f"symbols: {lengths['symbol']}"))
     if 'letter' in lengths:
         length_elements.append(html.Div(f"letters&numbers: {lengths['letter']}"))
-        
+
     return length_elements, w_min, w_min, w_min, w_max
 
 
 def remove_empty_strings(arr: List[str]) -> List[str]:
     """
     Видаляє порожні рядки та спеціальні символи з списку.
-    
+
     Args:
         arr: Список рядків для обробки
-        
+
     Returns:
         List[str]: Список без порожніх рядків та спеціальних символів
     """
     return [item for item in arr if item and item != '\ufeff']
 
-new_ngram = None
 
+new_ngram = None
 
 # Add callback for batch processing
 from dash import callback_context, exceptions
+
 
 @app.callback(
     [Output("batch_table", "data"),
@@ -1831,17 +1894,17 @@ def process_all_files(text_clicks, code_clicks,
 
         # 2) window parameters
         if batch_window_mode == "ui":
-            wm_val = int(w_max) if w_max is not None else max(10, L//20)
-            w_val  = int(w_s) if w_s is not None else max(1, wm_val//10)
+            wm_val = int(w_max) if w_max is not None else max(10, L // 20)
+            w_val = int(w_s) if w_s is not None else max(1, wm_val // 10)
             wh_val = w_val
             we_val = int(w_e) if w_e is not None else w_val
         else:
             if definition == "dynamic":
-                wm_val = max(10, L//10)
-                w_val  = max(1, wm_val//10)
+                wm_val = max(10, L // 10)
+                w_val = max(1, wm_val // 10)
             else:
-                wm_val = max(10, L//20)
-                w_val  = max(1, wm_val//20)
+                wm_val = max(10, L // 20)
+                w_val = max(1, wm_val // 20)
             wh_val = w_val
             we_val = w_val
 
@@ -1853,7 +1916,7 @@ def process_all_files(text_clicks, code_clicks,
         for pos, gram in enumerate(data):
             if gram not in local_model:
                 ng = Ngram()
-                ng.pos  = []
+                ng.pos = []
                 local_model[gram] = ng
             local_model[gram].pos.append(pos)
 
@@ -1882,8 +1945,8 @@ def process_all_files(text_clicks, code_clicks,
                 cnts = make_windows(
                     ng.bool, wi=w, l=L, wsh=wh_val,
                     overlap_mode=overlap_mode,
-                    min_window=(w_val if overlap_mode!="overlapping" else None),
-                    window_expansion=(we_val if overlap_mode!="overlapping" else None)
+                    min_window=(w_val if overlap_mode != "overlapping" else None),
+                    window_expansion=(we_val if overlap_mode != "overlapping" else None)
                 )
                 ff_vals.append(mse(cnts))
             ng.fa = dict(zip(windows, ff_vals))
@@ -1898,28 +1961,33 @@ def process_all_files(text_clicks, code_clicks,
                 a_val = g_val = err = 0.0
 
             temp_R.append(round(R(ng.dt), 8))
-            temp_a.append(round(a_val,   8))
-            temp_gamma.append(round(g_val,8))
-            temp_err.append(round(err,    5))
+            temp_a.append(round(a_val, 8))
+            temp_gamma.append(round(g_val, 8))
+            temp_err.append(round(err, 5))
 
         # 6) build DataFrame row & collect stats
         V = len(valid)
         elapsed = round(time() - start_time, 3)
         batch_results.append({
-            "no":         idx,
-            "filename":   filename,
-            "f_min":      f_min,
-            "length":     L,
+            "no": idx,
+            "filename": filename,
+            "f_min": f_min,
+            "length": L,
             "vocabulary": V,
-            "time":       elapsed,
-            "r_avg":      round(np.mean(temp_R),   8) if temp_R else 0,
-            "dr":         round(np.std(temp_R),    8) if temp_R else 0,
-            "rw_avg":     round(np.average(temp_R, weights=np.array(temp_R)/sum(temp_R)), 8) if temp_R else 0,
-            "drw":        round(np.sqrt(np.average((np.array(temp_R)-np.average(temp_R, weights=np.array(temp_R)/sum(temp_R)))**2, weights=np.array(temp_R)/sum(temp_R))), 8) if temp_R else 0,
-            "gamma_avg":  round(np.mean(temp_gamma),8) if temp_gamma else 0,
-            "dgamma":     round(np.std(temp_gamma), 8) if temp_gamma else 0,
-            "gammaw_avg":round(np.average(temp_gamma, weights=np.array(temp_gamma)/sum(temp_gamma)), 8) if temp_gamma else 0,
-            "dgammaw":   round(np.sqrt(np.average((np.array(temp_gamma)-np.average(temp_gamma, weights=np.array(temp_gamma)/sum(temp_gamma)))**2, weights=np.array(temp_gamma)/sum(temp_gamma))), 8) if temp_gamma else 0,
+            "time": elapsed,
+            "r_avg": round(np.mean(temp_R), 8) if temp_R else 0,
+            "dr": round(np.std(temp_R), 8) if temp_R else 0,
+            "rw_avg": round(np.average(temp_R, weights=np.array(temp_R) / sum(temp_R)), 8) if temp_R else 0,
+            "drw": round(np.sqrt(
+                np.average((np.array(temp_R) - np.average(temp_R, weights=np.array(temp_R) / sum(temp_R))) ** 2,
+                           weights=np.array(temp_R) / sum(temp_R))), 8) if temp_R else 0,
+            "gamma_avg": round(np.mean(temp_gamma), 8) if temp_gamma else 0,
+            "dgamma": round(np.std(temp_gamma), 8) if temp_gamma else 0,
+            "gammaw_avg": round(np.average(temp_gamma, weights=np.array(temp_gamma) / sum(temp_gamma)),
+                                8) if temp_gamma else 0,
+            "dgammaw": round(np.sqrt(np.average(
+                (np.array(temp_gamma) - np.average(temp_gamma, weights=np.array(temp_gamma) / sum(temp_gamma))) ** 2,
+                weights=np.array(temp_gamma) / sum(temp_gamma))), 8) if temp_gamma else 0,
         })
 
         # cleanup
@@ -1931,71 +1999,75 @@ def process_all_files(text_clicks, code_clicks,
         add_batch_statistics(batch_results)
 
     return batch_results, {"display": "block"}
-    
+
+
 def add_batch_statistics(results):
     """
     Adds mean and standard deviation rows to batch results
-    
+
     Args:
         results: List of batch results to add statistics to
     """
     if not results:
         return
-    
+
     # Extract only numerical data for statistics
     data_for_stats = []
-    numeric_fields = ["length", "vocabulary", "time", "r_avg", "dr", "rw_avg", "drw", 
-                    "gamma_avg", "dgamma", "gammaw_avg", "dgammaw"]
-    
+    numeric_fields = ["length", "vocabulary", "time", "r_avg", "dr", "rw_avg", "drw",
+                      "gamma_avg", "dgamma", "gammaw_avg", "dgammaw"]
+
     for item in results:
         # Skip statistics rows (if this function is called multiple times)
         if item["filename"] in ["MEAN", "STDDEV"]:
             continue
-        
+
         data_point = {}
         for field in numeric_fields:
             if field in item:
                 data_point[field] = item[field]
-        
+
         data_for_stats.append(data_point)
-    
+
     # Calculate means
     if not data_for_stats:
         return
-        
+
     df_stats = pd.DataFrame(data_for_stats)
-    
+
     # Calculate means
     means = {
         "no": len(results) + 1,
         "filename": "MEAN",
         "f_min": "-",
     }
-    
+
     # Calculate standard deviations
     stddevs = {
         "no": len(results) + 2,
         "filename": "STDDEV",
         "f_min": "-",
     }
-    
+
     # Fill in statistics for all numeric fields
     for field in numeric_fields:
         if field in df_stats.columns:
-            means[field] = round(df_stats[field].mean(), 
-                               8 if field in ["r_avg", "dr", "rw_avg", "drw", "gamma_avg", "dgamma", "gammaw_avg", "dgammaw"] else 
-                               3 if field == "time" else 0)
-            
-            stddevs[field] = round(df_stats[field].std(), 
-                                 8 if field in ["r_avg", "dr", "rw_avg", "drw", "gamma_avg", "dgamma", "gammaw_avg", "dgammaw"] else 
+            means[field] = round(df_stats[field].mean(),
+                                 8 if field in ["r_avg", "dr", "rw_avg", "drw", "gamma_avg", "dgamma", "gammaw_avg",
+                                                "dgammaw"] else
                                  3 if field == "time" else 0)
-    
+
+            stddevs[field] = round(df_stats[field].std(),
+                                   8 if field in ["r_avg", "dr", "rw_avg", "drw", "gamma_avg", "dgamma", "gammaw_avg",
+                                                  "dgammaw"] else
+                                   3 if field == "time" else 0)
+
     # Remove old statistics rows if present
     results[:] = [r for r in results if r["filename"] not in ["MEAN", "STDDEV"]]
-    
+
     # Add statistics to results
     results.append(means)
     results.append(stddevs)
+
 
 # Update the batch results table to show window parameters too
 @app.callback(
@@ -2005,7 +2077,7 @@ def add_batch_statistics(results):
 def update_batch_table_columns(n_clicks):
     if n_clicks is None:
         raise dash.exceptions.PreventUpdate
-    
+
     columns = [
         {"name": "No.", "id": "no"},
         {"name": "Filename", "id": "filename"},
@@ -2022,12 +2094,13 @@ def update_batch_table_columns(n_clicks):
         {"name": "gammaw_avg", "id": "gammaw_avg"},
         {"name": "dgammaw", "id": "dgammaw"}
     ]
-    
+
     return columns
+
 
 # Add callback to save batch results
 @app.callback(
-    Output("temp_seve_batch", "children"),  # Changed output ID to avoid conflicts
+    Output("temp_seve_batch", "children"),
     [Input("save_batch", "n_clicks")],
     [State("n_size", "value"),
      State("split", "value"),
@@ -2037,39 +2110,29 @@ def update_batch_table_columns(n_clicks):
      State("overlap_mode", "value"),
      State("batch_window_mode", "value")]
 )
-def save_batch_results(n_clicks, n_size, split, condition, definition, min_dist_option, overlap_mode, batch_window_mode):
+def save_batch_results(n_clicks, n_size, split, condition, definition,
+                       min_dist_option, overlap_mode, batch_window_mode):
     if n_clicks is None:
         return dash.no_update
     if not batch_results:
         return html.Div(["No batch results to save"])
-    
     try:
-        save_folder = pick_folder()
-        if save_folder is None or save_folder == "":
-            return dash.no_update
-        # Create DataFrame from batch results
-        df_batch = pd.DataFrame(batch_results)
-        
-        # Ensure column names match the display columns for consistency
-        # This ensures the saved file has the same data structure as what's shown in the UI
-        column_mapping = {}
-        
-        # Create filename with parameters
-        output_filename = "{}/batch_results_n={},split={},condition={},definition={},min_dist={},overlap={},window_mode={}.xlsx".format(
-            save_folder, n_size, split, condition, definition, min_dist_option, overlap_mode, batch_window_mode)
-        
-        # Ensure directory exists
+        # always save into ./saved_data/
+        save_folder = "saved_data"
         os.makedirs(save_folder, exist_ok=True)
-        
-        # Save to Excel - modify to use older pandas style
-        writer = pd.ExcelWriter(output_filename)
-        df_batch.to_excel(writer, index=False)
-        writer.save()
-        #writer.close()
-        
-        return html.Div(["Saved batch results to {}".format(output_filename)])
+
+        df_batch = pd.DataFrame(batch_results)
+        base = (f"batch_results_n={n_size},split={split},condition={condition},"
+                f"definition={definition},min_dist={min_dist_option},"
+                f"overlap={overlap_mode},window_mode={batch_window_mode}")
+        filename = os.path.join(save_folder, f"{base}.xlsx")
+        unique = get_unique_path(filename)
+
+        df_batch.to_excel(unique, index=False)
+        return html.Div([f"Saved!"])
     except Exception as e:
-        return html.Div(["Error saving batch results: {}".format(str(e))])
+        return html.Div([f"Error saving batch results: {e}"])
+
 
 @app.callback(
     [Output("table", "data"),
@@ -2084,17 +2147,17 @@ def save_batch_results(n_clicks, n_size, split, condition, definition, min_dist_
      Input("analyze_code", "n_clicks"),
      Input("dataframe", "active_tab")],
     [State("file-selector", "value"),
-     State("f_min",        "value"),
-     State("w_min",        "value"),
-     State("w_s",          "value"),
-     State("w_e",          "value"),
-     State("w_max",        "value"),
-     State("def",          "value"),
-     State("min_dist_option","value"),
+     State("f_min", "value"),
+     State("w_min", "value"),
+     State("w_s", "value"),
+     State("w_e", "value"),
+     State("w_max", "value"),
+     State("def", "value"),
+     State("min_dist_option", "value"),
      State("overlap_mode", "value"),
-     State("n_size",       "value"),
-     State("split",        "value"),
-     State("condition",    "value")]
+     State("n_size", "value"),
+     State("split", "value"),
+     State("condition", "value")]
 )
 def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
                  definition, min_dist_option, overlap_mode,
@@ -2118,7 +2181,7 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
         # build ngrams if n_size > 1
         n = int(n_size or 1)
         if n > 1:
-            data = [tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
+            data = [tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
         else:
             data = tokens
 
@@ -2127,13 +2190,13 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
 
         # window parameters
         if definition == "dynamic":
-            w_max_val = max(10, int(L/10))
-            w_s_val   = max(1, int(w_max_val/10))
-            w_e_val   = w_s_val
+            w_max_val = max(10, int(L / 10))
+            w_s_val = max(1, int(w_max_val / 10))
+            w_e_val = w_s_val
         else:
-            w_s_val   = max(1, int(w_s or 1))
-            w_max_val = max(w_s_val+1, int(w_max or L))
-            w_e_val   = max(1, int(w_e or w_s_val))
+            w_s_val = max(1, int(w_s or 1))
+            w_max_val = max(w_s_val + 1, int(w_max or L))
+            w_e_val = max(1, int(w_e or w_s_val))
 
         windows = list(range(w_s_val, w_max_val, w_e_val)) or [w_s_val]
 
@@ -2142,7 +2205,7 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
         for idx, gram in enumerate(data):
             if gram not in local_model:
                 ng = Ngram()
-                ng.pos  = []
+                ng.pos = []
                 ng.bool = np.zeros(L, dtype=np.uint8)
                 local_model[gram] = ng
             local_model[gram].pos.append(idx)
@@ -2174,10 +2237,10 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
 
             try:
                 c, _ = curve_fit(fit, windows, fa_vals, method="lm", maxfev=5000)
-                a_val     = round(c[0], 8)
+                a_val = round(c[0], 8)
                 gamma_val = round(c[1], 8)
-                fit_vals  = [fit(w, *c) for w in windows]
-                goodness  = round(r2_score(fa_vals, fit_vals), 5)
+                fit_vals = [fit(w, *c) for w in windows]
+                goodness = round(r2_score(fa_vals, fit_vals), 5)
             except:
                 a_val = gamma_val = goodness = 0.0
                 fit_vals = [0] * len(windows)
@@ -2211,24 +2274,29 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
             })
 
         # stash globals for the plots
-        analysis_mode   = "py"
-        current_model   = local_model
-        current_tokens  = data
+        analysis_mode = "code"
+        current_model = local_model
+        current_tokens = data
         current_windows = windows
-        python_metrics  = pm
-        current_L       = L
+        python_metrics = pm
+        current_L = L
         current_w_s_val = w_s_val
         V = len(valid_keys)
 
+        # make sure we can save code results later
+        import pandas as _pd
+        global df
+        df = _pd.DataFrame(records)
+
         return (
             records,
-            dash.no_update,            # keep existing chain plot
-            {"display": "inline"},     # show table
-            {"display": "none"},       # hide chain tab
-            dash.no_update,            # no alert
+            dash.no_update,  # keep existing chain plot
+            {"display": "inline"},  # show table
+            {"display": "none"},  # hide chain tab
+            dash.no_update,  # no alert
             f"Vocabulary: {V}",
             f"Time: {execution_time:.4f} s",
-            False                      # close any open toast
+            False  # close any open toast
         )
 
     # ------------------------------
@@ -2504,8 +2572,6 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
         raise exceptions.PreventUpdate
 
 
-
-
 clikced_ngram = None
 
 
@@ -2513,7 +2579,7 @@ clikced_ngram = None
               [Input("dataframe", "active_tab"),
                Input("card-tabs", "active_tab"),
                Input("table", "active_cell"),
-                # NOTE додала параметр page_current та використала його для показу правильної інформації
+               # NOTE додала параметр page_current та використала його для показу правильної інформації
                Input("table", "page_current"),
                Input("table", "derived_virtual_selected_rows"),
                Input("table", "derived_virtual_indices"),
@@ -2531,7 +2597,7 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, id
     global analysis_mode, current_model, current_tokens, current_windows, python_metrics, current_L
 
     # —— Python‐file override for both graphs ——
-    if analysis_mode == 'py':
+    if analysis_mode == 'code':
         # determine clicked token
         tok = None
         if active_cell and ids:
@@ -2550,10 +2616,10 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, id
 
         # ∆F or α/R plot
         fig_fa = go.Figure()
-        if active_tab1 == 'tab2':   # fluctuation tab
+        if active_tab1 == 'tab2':  # fluctuation tab
             fa = python_metrics[tok]['fa_vals']
             fit_vals = python_metrics[tok]['fit_vals']
-            fig_fa.add_trace(go.Scatter(x=current_windows, y=fa,      mode='markers', name="∆F"))
+            fig_fa.add_trace(go.Scatter(x=current_windows, y=fa, mode='markers', name="∆F"))
             fig_fa.add_trace(go.Scatter(x=current_windows, y=fit_vals, name="fit"))
         else:  # alpha/R tab
             Rv = python_metrics[tok]['R']
@@ -2577,8 +2643,9 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, id
                     ## add bar
                     if fa_click:
                         if overlap_mode == "overlapping":
-                            fig.add_trace(go.Bar(x=np.arange(w_s, L, w_s), y=new_ngram.count[fa_click["points"][0]["x"]],
-                                                name="∑∆w"))
+                            fig.add_trace(
+                                go.Bar(x=np.arange(w_s, L, w_s), y=new_ngram.count[fa_click["points"][0]["x"]],
+                                       name="∑∆w"))
                         else:
                             # Для non-overlapping режиму потрібно розрахувати положення барів
                             bar_positions = []
@@ -2595,11 +2662,13 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, id
                     # Перевірка, чи existує new_ngram та його атрибути
                     if new_ngram is not None and hasattr(new_ngram, 'dfa') and new_ngram.dfa:
                         fig1.add_trace(
-                            go.Scatter(x=[*new_ngram.dfa.keys()], y=[*new_ngram.dfa.values()], mode='markers', name="∆F"))
-                        
+                            go.Scatter(x=[*new_ngram.dfa.keys()], y=[*new_ngram.dfa.values()], mode='markers',
+                                       name="∆F"))
+
                         if hasattr(new_ngram, 'temp_dfa') and new_ngram.temp_dfa:
-                            fig1.add_trace(go.Scatter(x=[*new_ngram.dfa.keys()], y=[*new_ngram.temp_dfa], name="fit=aw^b"))
-                        
+                            fig1.add_trace(
+                                go.Scatter(x=[*new_ngram.dfa.keys()], y=[*new_ngram.temp_dfa], name="fit=aw^b"))
+
                         fig1.update_xaxes(type=scale)
                         fig1.update_yaxes(type=scale)
                         fig1.update_layout(hovermode="x unified")
@@ -2616,8 +2685,9 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, id
 
                 if fa_click:
                     if overlap_mode == "overlapping":
-                        fig.add_trace(go.Bar(x=np.arange(w_s, L, w_s), y=model[ngram].counts[fa_click["points"][0]["x"]],
-                                             name="∑∆w"))
+                        fig.add_trace(
+                            go.Bar(x=np.arange(w_s, L, w_s), y=model[ngram].counts[fa_click["points"][0]["x"]],
+                                   name="∑∆w"))
                     else:
                         # Для non-overlapping режиму потрібно розрахувати положення барів
                         bar_positions = []
@@ -2662,7 +2732,8 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, id
 
                     # Перевірка наявності new_ngram та його атрибутів
                     if new_ngram is not None and hasattr(new_ngram, 'R') and hasattr(new_ngram, 'gamma'):
-                        fig1.add_trace(go.Scatter(x=new_ngram.R, y=new_ngram.gamma, mode='markers', hover_data=["new_ngram"]))
+                        fig1.add_trace(
+                            go.Scatter(x=new_ngram.R, y=new_ngram.gamma, mode='markers', hover_data=["new_ngram"]))
                         fig1.update_xaxes(type=scale)
                         fig1.update_yaxes(type=scale)
                         fig1.update_layout(hovermode="x unified")
@@ -2726,150 +2797,99 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, id
     return dash.no_update, dash.no_update
 
 
-
-
-
-@app.callback([Output("temp_seve", "children")],
-              [Input("save", "n_clicks"),
-               Input("table", "active_cell"),
-               Input("table", "page_current"),
-               Input("table", "derived_virtual_indices")],
-              [State("file-selector", "value"),
-               State("n_size", "value"),
-               State("w_min", "value"),
-               State("w_s", "value"),
-               State("w_e", "value"),
-               State("w_max", "value"),
-               State("f_min", "value"),
-               State("condition", "value"),
-               State("def", "value"),
-               State("min_dist_option", "value"),
-               State("overlap_mode", "value")])
-def save(n, active_cell, page_current, ids, filename, n_size, w_min, w_s, w_e, w_max, fmin, opt, definition, min_dist_option, overlap_mode):
-    if n is None:
+@app.callback(
+    [Output("temp_seve", "children")],
+    [Input("save", "n_clicks"),
+     Input("table", "active_cell"),
+     Input("table", "page_current"),
+     Input("table", "derived_virtual_indices")],
+    [State("file-selector", "value"),
+     State("n_size", "value"),
+     State("w_min", "value"),
+     State("w_s", "value"),
+     State("w_e", "value"),
+     State("w_max", "value"),
+     State("f_min", "value"),
+     State("condition", "value"),
+     State("def", "value"),
+     State("min_dist_option", "value"),
+     State("overlap_mode", "value")]
+)
+def save(n_clicks, active_cell, page_current, ids,
+         filename, n_size, w_min, w_s, w_e, w_max,
+         fmin, condition, definition, min_dist_option, overlap_mode):
+    if n_clicks is None:
         return dash.no_update
-    if filename is None:
+    if not filename:
         return [html.Div(["No file selected to save"])]
-    
+
     try:
-        save_folder = pick_folder()
-        if save_folder is None or save_folder == "":
-            return dash.no_update
-        file = filename
+        save_folder = "saved_data"
+        os.makedirs(save_folder, exist_ok=True)
+
         global df, model, new_ngram
+        messages = []
 
-        # For dynamic mode, we want to save exactly what's shown in the table
         if definition == "dynamic":
-            # Create DataFrame with the new_ngram row
-            df_to_save = df.copy()  # This will include the new_ngram row
-            
-            output_filename = "{11}/{0} condition={7},fmin={1},n={2},w=({3},{4},{5},{6}),definition={8},min_dist={9},overlap={10}.xlsx".format(
-                file, fmin, n_size, w_min, w_s, w_e, w_max, opt, definition, min_dist_option, overlap_mode, save_folder)
-            
-            # Ensure save directory exists
-            os.makedirs(save_folder, exist_ok=True)
-            
-            # Save the main file with new_ngram data
-            writer = pd.ExcelWriter(output_filename)
-            df_to_save.to_excel(writer, index=False)
-            writer.save()
+            # Save the dynamic‐mode table (including new_ngram row)
+            df_to_save = df.copy()
+            base = (f"{filename} condition={condition},fmin={fmin},n={n_size},"
+                    f"w=({w_min},{w_s},{w_e},{w_max}),definition={definition},"
+                    f"min_dist={min_dist_option},overlap={overlap_mode}")
+            path_main = os.path.join(save_folder, f"{base}.xlsx")
+            unique_main = get_unique_path(path_main)
+            df_to_save.to_excel(unique_main, index=False)
+            messages.append(f"Saved main data to {unique_main}")
 
-            # If new_ngram exists and we have its details, save them too
-            if new_ngram and hasattr(new_ngram, 'dfa'):
-                details_filename = "{}/{} new_ngram_details.xlsx".format(save_folder, file)
-                writer_details = pd.ExcelWriter(details_filename)
-                df_details = pd.DataFrame()
-                df_details["w"] = list(new_ngram.dfa.keys())
-                df_details['∆F'] = list(new_ngram.dfa.values())
-                df_details['fit=a*w^b'] = new_ngram.temp_dfa
-                df_details.to_excel(writer_details, index=False)
-                writer_details.save()
-                return [html.Div([
-                    "Saved main data to {}".format(output_filename),
-                    html.Br(),
-                    "Saved new_ngram details to {}".format(details_filename)
-                ])]
-            
-            return [html.Div(["Saved data to {}".format(output_filename)])]
-        
-        else:  # For non-dynamic mode, keep existing logic
-            df_copy = df.copy()
-            df_copy = df_copy[df_copy.ngram != 'new_ngram']
-            df_copy['rank'] = range(1, len(df_copy) + 1)
+            # also save new_ngram details if present
+            if new_ngram and hasattr(new_ngram, "dfa"):
+                df_details = pd.DataFrame({
+                    "w": list(new_ngram.dfa.keys()),
+                    "∆F": list(new_ngram.dfa.values()),
+                    "fit=a*w^b": new_ngram.temp_dfa
+                })
+                details_base = f"{filename}_new_ngram_details"
+                path_det = os.path.join(save_folder, f"{details_base}.xlsx")
+                unique_det = get_unique_path(path_det)
+                df_details.to_excel(unique_det, index=False)
+                messages.append(f"Saved new_ngram details to {unique_det}")
 
-            if len(df_copy) > 0:
-                df_copy['w'] = (df_copy['F']) / (df_copy['F'].sum())
+        else:
+            # Non-dynamic mode: compute the eight summary metrics
+            df_copy = df[df.ngram != "new_ngram"].copy()
+            df_copy['w'] = df_copy['F'] / df_copy['F'].sum()
 
-                R_avg = df_copy['R'].mean()
-                dR = df_copy['R'].std()
-                Rw_avg = (df_copy['R'] * df_copy['w']).sum()
-                dRw = np.sqrt((((df_copy['R'] - Rw_avg) ** 2) * df_copy['w']).sum())
+            R_avg    = df_copy['R'].mean()
+            dR       = df_copy['R'].std()
+            Rw_avg   = (df_copy['R'] * df_copy['w']).sum()
+            dRw      = np.sqrt(((df_copy['R'] - Rw_avg)**2 * df_copy['w']).sum())
+            gamma_avg= df_copy['gamma'].mean()
+            dgamma   = df_copy['gamma'].std()
+            gammaw_avg = (df_copy['gamma'] * df_copy['w']).sum()
+            dgammaw  = np.sqrt(((df_copy['gamma']-gammaw_avg)**2 * df_copy['w']).sum())
 
-                gamma_avg = df_copy['gamma'].mean()
-                dgamma = df_copy['gamma'].std()
-                gammaw_avg = (df_copy['gamma'] * df_copy['w']).sum()
-                dgammaw = np.sqrt((((df_copy['gamma'] - gammaw_avg) ** 2) * df_copy['w']).sum())
+            # stick them into the first row
+            for col, val in [
+                ("R_avg", R_avg), ("dR", dR),
+                ("Rw_avg", Rw_avg), ("dRw", dRw),
+                ("gamma_avg", gamma_avg), ("dgamma", dgamma),
+                ("gammaw_avg", gammaw_avg), ("dgammaw", dgammaw)
+            ]:
+                df_copy[col] = None
+                df_copy.loc[df_copy.index[0], col] = val
 
-                df_copy.loc[:, 'R_avg'] = None
-                df_copy.loc[df_copy.index[0], 'R_avg'] = R_avg
-                df_copy.loc[:, 'dR'] = None
-                df_copy.loc[df_copy.index[0], 'dR'] = dR
-                df_copy.loc[:, 'Rw_avg'] = None
-                df_copy.loc[df_copy.index[0], 'Rw_avg'] = Rw_avg
-                df_copy.loc[:, 'dRw'] = None
-                df_copy.loc[df_copy.index[0], 'dRw'] = dRw
+            df_copy = df_copy.drop(columns=["w"])
+            base = (f"{filename} condition={condition},fmin={fmin},n={n_size},"
+                    f"w=({w_min},{w_s},{w_e},{w_max}),definition={definition},"
+                    f"min_dist={min_dist_option},overlap={overlap_mode}")
+            path_main = os.path.join(save_folder, f"{base}.xlsx")
+            unique_main = get_unique_path(path_main)
+            df_copy.to_excel(unique_main, index=False)
+            messages.append(f"Saved!")
 
-                df_copy.loc[:, 'gamma_avg'] = None
-                df_copy.loc[df_copy.index[0], 'gamma_avg'] = gamma_avg
-                df_copy.loc[:, 'dgamma'] = None
-                df_copy.loc[df_copy.index[0], 'dgamma'] = dgamma
-                df_copy.loc[:, 'gammaw_avg'] = None
-                df_copy.loc[df_copy.index[0], 'gammaw_avg'] = gammaw_avg
-                df_copy.loc[:, 'dgammaw'] = None
-                df_copy.loc[df_copy.index[0], 'dgammaw'] = dgammaw
-
-                df_copy = df_copy.drop(columns=['w'])
-
-            output_filename = "{11}/{0} condition={7},fmin={1},n={2},w=({3},{4},{5},{6}),definition={8},min_dist={9},overlap={10}.xlsx".format(
-                file, fmin, n_size, w_min, w_s, w_e, w_max, opt, definition, min_dist_option, overlap_mode, save_folder)
-            
-            os.makedirs(save_folder, exist_ok=True)
-            
-            writer = pd.ExcelWriter(output_filename)
-            df_copy.to_excel(writer, index=False)
-            writer.save()
-
-            if active_cell:
-                try:
-                    row_index = active_cell['row']
-                    if page_current is not None and page_current > 0:
-                        row_index += page_current * 50
-
-                    if ids is not None and row_index < len(ids):
-                        selected_index = ids[row_index]
-                        if selected_index < len(df):
-                            ngram = df.iloc[selected_index]['ngram']
-                            if ngram != 'new_ngram' and ngram in model:
-                                details_filename = "{}/{} {}_details.xlsx".format(save_folder, file, ngram)
-                                writer_details = pd.ExcelWriter(details_filename)
-                                df1 = pd.DataFrame()
-                                df1["w"] = list(model[ngram].fa.keys())
-                                df1['∆F'] = list(model[ngram].fa.values())
-                                df1['fit=a*w^b'] = model[ngram].temp_fa
-                                df1.to_excel(writer_details, index=False)
-                                writer_details.save()
-                                return [html.Div([
-                                    "Saved main data to {}".format(output_filename),
-                                    html.Br(),
-                                    "Saved details to {}".format(details_filename)
-                                ])]
-                except Exception as e:
-                    print("Error saving ngram details: {}".format(e))
-
-            return [html.Div(["Saved data to {}".format(output_filename)])]
-            
+        return [html.Div([html.Div(msg) for msg in messages])]
     except Exception as e:
-        return [html.Div(["Error saving data: {}".format(str(e))])]
+        return [html.Div([f"Error saving data: {e}"])]
 
 
 def pick_folder():
@@ -2877,7 +2897,7 @@ def pick_folder():
     root.withdraw()
     root.attributes('-topmost', True)
     folder_selected = filedialog.askdirectory()
-    root.destroy() 
+    root.destroy()
 
     if folder_selected:
         return folder_selected
@@ -2888,9 +2908,10 @@ def pick_folder():
 # import webbrowser # Commented out as it might cause issues if run non-interactively
 
 if __name__ == "__main__":
-    webbrowser.open_new("http://127.0.0.1:8050/") # Автоматично відкриває браузер
+    webbrowser.open_new("http://127.0.0.1:8050/")  # Автоматично відкриває браузер
     # Replace app.run() with the older style Flask server run for Dash < 2.0
     app.server.run(host='0.0.0.0', port=8050, debug=False)
+
 
 # Add callback to toggle batch window settings
 @app.callback(
