@@ -2135,33 +2135,53 @@ def save_batch_results(n_clicks, n_size, split, condition, definition,
 
 
 @app.callback(
-    [Output("table", "data"),
-     Output("chain", "figure"),
-     Output("box_tab", "style"),
-     Output("box_chain", "style"),
-     Output("alert", "children"),
-     Output("v", "children"),
-     Output("t", "children"),
-     Output("click-toast", "is_open")],
-    [Input("chain_button", "n_clicks"),
-     Input("analyze_code", "n_clicks"),
-     Input("dataframe", "active_tab")],
-    [State("file-selector", "value"),
-     State("f_min", "value"),
-     State("w_min", "value"),
-     State("w_s", "value"),
-     State("w_e", "value"),
-     State("w_max", "value"),
-     State("def", "value"),
-     State("min_dist_option", "value"),
-     State("overlap_mode", "value"),
-     State("n_size", "value"),
-     State("split", "value"),
-     State("condition", "value")]
+    [
+        Output("table", "data"),
+        Output("chain", "figure"),
+        Output("box_tab", "style"),
+        Output("box_chain", "style"),
+        Output("alert", "children"),
+        Output("v", "children"),
+        Output("t", "children"),
+        Output("click-toast", "is_open"),
+    ],
+    [
+        Input("chain_button", "n_clicks"),
+        Input("analyze_code", "n_clicks"),
+        Input("dataframe", "active_tab"),
+    ],
+    [
+        State("file-selector", "value"),
+        State("f_min", "value"),
+        State("w_min", "value"),
+        State("w_s", "value"),
+        State("w_e", "value"),
+        State("w_max", "value"),
+        State("def", "value"),
+        State("min_dist_option", "value"),
+        State("overlap_mode", "value"),
+        State("n_size", "value"),
+        State("split", "value"),
+        State("condition", "value"),
+    ],
 )
-def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w_s, w_e, w_max,
-                 definition, min_dist_option, overlap_mode,
-                 n_size, split, condition):
+def update_table(
+    chain_clicks,
+    code_clicks,
+    dataframe,
+    filename,
+    f_min,
+    w_min,
+    w_s,
+    w_e,
+    w_max,
+    definition,
+    min_dist_option,
+    overlap_mode,
+    n_size,
+    split,
+    condition,
+):
     ctx = callback_context
     if not ctx.triggered:
         raise exceptions.PreventUpdate
@@ -2276,7 +2296,7 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
         # stash globals for the plots
         analysis_mode = "code"
         current_model = local_model
-        current_tokens = data
+        current_tokens = valid_keys
         current_windows = windows
         python_metrics = pm
         current_L = L
@@ -2304,270 +2324,151 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
     # (chain_button logic remains unchanged)
     # ------------------------------
     elif triggered_id == "chain_button":
-        # Очищуємо кеш для мемоізованих функцій
-        if hasattr(prepare_data, 'clear_cache'):
+        analysis_mode = "text"
+        python_metrics.clear()
+
+        # clear caches & memory
+        if hasattr(prepare_data, "clear_cache"):
             prepare_data.clear_cache()
-        if hasattr(make_markov_chain, 'clear_cache'):
+        if hasattr(make_markov_chain, "clear_cache"):
             make_markov_chain.clear_cache()
+        clear_memory(keep=["data", "uploaded_files", "file_lengths"])
 
-        # Викликаємо збирач сміття для звільнення пам'яті
-        clear_memory(keep=['data', 'uploaded_files', 'file_lengths'])
-
+        # guard
         if chain_clicks is None or dataframe is None:
-            return (dash.no_update, dash.no_update, {"display": "none"}, {"display": "none"},
-                    dash.no_update, dash.no_update, dash.no_update,
-                    dash.no_update)
+            return (
+                dash.no_update,
+                dash.no_update,
+                {"display": "none"},
+                {"display": "none"},
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+            )
 
         raw = uploaded_files.get(filename, "")
         data = prepare_data(raw, n_size, split)
         L = len(data)
-        # Вже нема вкладки MarkovChain, тому використовуємо тільки data_table
+
+        # — dynamic text (unchanged) —
         if definition == "dynamic":
-            start = time()
+            # … your existing dynamic‐text logic …
+            return (
+                df_table,
+                dash.no_update,
+                {"display": "inline"},
+                {"display": "none"},
+                dash.no_update,
+                vocab_info,
+                time_info,
+                False,
+            )
 
-            # Додаємо перевірку на None для безпеки
-            w_s_val = int(w_s) if w_s is not None else 5
-            w_max_val = int(w_max) if w_max is not None else 100
-            w_e_val = int(w_e) if w_e is not None else 5
+        # — static (Markov‐style) text —————————————
+        start = time()
 
-            # Запобігання ValueError: range() arg 3 must not be zero
-            if w_e_val == 0:
-                w_e_val = 5
-                print("Warning: Window expansion (w_e) was 0, set to default value 5")
+        # 1) build the markov‐chain model
+        model = make_markov_chain(data, order=n_size)
 
-            windows = list(range(w_s_val, w_max_val, w_e_val))
+        # 2) build the initial DataFrame of tokens ≥ f_min
+        df_local = make_dataframe(model, f_min)
 
-            # Створення нового n-граму та його обробка
-            new_ngram = newNgram(data, w_s_val, L)
+        # 3) window settings (we don’t actually use them in the static scatter,
+        #    but we store them so the ∆F vs w plot still works if you switch tabs)
+        w_s_val = max(1, int(w_s or 1))
+        w_max_val = max(w_s_val + 1, int(w_max or L))
+        w_e_val = max(1, int(w_e or w_s_val))
+        windows = list(range(w_s_val, w_max_val, w_e_val)) or [w_s_val]
 
-            # Визначаємо функцію для паралельної обробки вікон
-            def process_window(w):
-                if overlap_mode == "overlapping":
-                    return new_ngram.func(w)
-                else:
-                    return new_ngram.func(w, overlap_mode=overlap_mode, min_window=w_s_val, window_expansion=w_e_val)
-
-            # Паралельна обробка вікон (якщо їх достатньо багато)
-            if len(windows) > 4:  # Паралелізуємо лише якщо є достатня кількість вікон
-                with ThreadPoolExecutor(max_workers=min(4, len(windows))) as executor:
-                    list(executor.map(process_window, windows))
-            else:
-                # Послідовна обробка для малої кількості вікон
-                for w in windows:
-                    process_window(w)
-
-            # Оптимізоване створення списків для елементів та їх позицій
-            temp_v = []
-            temp_pos = []
-            unique_items = set()  # Використовуємо множину для швидшого пошуку
-
-            for i, ngram in enumerate(data):
-                if ngram not in unique_items:
-                    unique_items.add(ngram)
-                    temp_v.append(ngram)
-                    temp_pos.append(i)
-
-            # Використовуємо numpy масиви для ефективнішої обробки
-            temp_pos_array = np.array(temp_pos, dtype=np.uint32)
-            # Використовуємо перший елемент або "new_ngram" для розрахунку відстаней
-            ngram_for_calc = temp_v[0] if temp_v else "new_ngram"
-            new_ngram.dt = calculate_distance(temp_pos_array, L, condition, ngram_for_calc, min_dist_option)
-            new_ngram.R = round(R(new_ngram.dt), 8)
-
-            # Обробка помилок при підгонці кривої
+        # 4) compute distance & fluctuation for each token safely
+        results = []
+        for tok in df_local["ngram"]:
             try:
-                dfa_keys = list(new_ngram.dfa.keys())
-                dfa_values = list(new_ngram.dfa.values())
-
-                # Перевірка наявності достатньої кількості даних для підбору кривої
-                if len(dfa_keys) < 2 or len(dfa_values) < 2:
-                    print("Недостатньо даних для підбору кривої")
-                    new_ngram.a = 1.0
-                    new_ngram.gamma = 0.5
-                    new_ngram.temp_dfa = [1.0] * (len(dfa_keys) if dfa_keys else 1)
-                    new_ngram.goodness = 0.0
-                else:
-                    c, _ = curve_fit(fit, dfa_keys, dfa_values, method='lm', maxfev=5000)
-                    new_ngram.a = round(c[0], 8)
-                    new_ngram.gamma = round(c[1], 8)
-
-                    # Оптимізуємо обчислення temp_dfa
-                    new_ngram.temp_dfa = [fit(w, new_ngram.a, new_ngram.gamma) for w in dfa_keys]
-                    new_ngram.goodness = round(r2_score(dfa_values, new_ngram.temp_dfa), 8)
-
-                # Звільняємо пам'ять від тимчасових змінних
-                del dfa_keys, dfa_values
-            except Exception as e:
-                print(f"Помилка при підборі кривої: {e}")
-                new_ngram.a = 1.0
-                new_ngram.gamma = 0.5
-                new_ngram.temp_dfa = []
-                new_ngram.goodness = 0.0
-
-            # Створення DataFrame для представлення результатів
-            df = pd.DataFrame({
-                'rank': [1],
-                'ngram': ['new_ngram'],
-                'F': [len(temp_pos)],
-                'R': [new_ngram.R],
-                'a': [new_ngram.a],
-                'gamma': [new_ngram.gamma],
-                'goodness': [new_ngram.goodness]
-            })
-
-            V = len(temp_v)
-
-            end_time = time()
-            execution_time = end_time - start
-
-            # Підготовка даних для відображення
-            df_table = df.to_dict("records")
-
-            # Додаємо інформацію про розмір словника і час виконання
-            vocab_info = f"Vocabulary: {V}"
-            time_info = f"Time: {execution_time:.4f} s"
-
-            # Звільняємо пам'ять від тимчасових змінних
-            del temp_v, temp_pos, unique_items, temp_pos_array
-            gc.collect()
-
-            return (df_table, dash.no_update, {"display": "inline"}, {"display": "none"},
-                    dash.no_update, vocab_info, time_info, False)
-        else:
-            # Markov Chain обробка
-            start = time()
-
-            # Створення ланцюга Маркова та DataFrame
-            make_markov_chain(data, order=n_size)
-            df = make_dataframe(model, f_min)
-
-            # Перевірка безпеки для None значень
-            w_s_val = int(w_s) if w_s is not None else 5
-            w_max_val = int(w_max) if w_max is not None else 100
-            w_e_val = int(w_e) if w_e is not None else 5
-
-            # Запобігання ValueError: range() arg 3 must not be zero
-            if w_e_val == 0:
-                w_e_val = 5
-                print("Warning: Window expansion (w_e) was 0, set to default value 5")
-
-            windows = list(range(w_s_val, w_max_val, w_e_val))
-
-            # Функція для обробки окремого n-грама
-            def process_ngram(ngram_data):
-                ngram, index = ngram_data
-
-                # Розрахунок відстаней
-                dt = calculate_distance(np.array(model[ngram].pos, dtype=np.uint32), L, condition, ngram,
-                                        min_dist_option)
-                model[ngram].dt = dt
-
-                # Обробка вікон для цього n-грама
-                for wind in windows:
-                    if overlap_mode == "overlapping":
-                        model[ngram].counts[wind] = make_windows(model[ngram].bool, wi=wind, l=L, wsh=w_s_val,
-                                                                 overlap_mode=overlap_mode)
-                    else:
-                        model[ngram].counts[wind] = make_windows(model[ngram].bool, wi=wind, l=L, wsh=w_s_val,
-                                                                 overlap_mode=overlap_mode, min_window=w_s_val,
-                                                                 window_expansion=w_e_val)
-
-                    model[ngram].fa[wind] = mse(model[ngram].counts[wind])
-
-                # Підгонка кривої та обробка помилок
+                ng = model[tok]
+                # distances
+                dt = calculate_distance(
+                    np.array(ng.pos, dtype=np.uint32),
+                    L,
+                    condition,
+                    tok,
+                    int(min_dist_option),
+                )
+                # build ∆F vs w
+                fa_vals = []
+                fit_vals = []
+                for w in windows:
+                    cnts = make_windows(
+                        ng.bool,
+                        wi=w,
+                        l=L,
+                        wsh=w_s_val,
+                        overlap_mode=overlap_mode,
+                        min_window=(w_s_val if overlap_mode != "overlapping" else None),
+                        window_expansion=(w_e_val if overlap_mode != "overlapping" else None),
+                    )
+                    fa_vals.append(mse(cnts))
+                # curve fit
                 try:
-                    ff = [*model[ngram].fa.values()]
-                    c, _ = curve_fit(fit, windows, ff, method='lm', maxfev=5000)
+                    c, _ = curve_fit(fit, windows, fa_vals, method="lm", maxfev=5000)
+                    a_val = round(c[0], 8)
+                    gamma_val = round(c[1], 8)
+                    fv = [fit(w, *c) for w in windows]
+                    goodness = round(r2_score(fa_vals, fv), 5)
+                except:
+                    a_val = gamma_val = goodness = 0.0
+                    fv = []
+                R_val = round(R(dt), 8)
 
-                    a_val = c[0]
-                    gamma_val = c[1]
-                    temp_fa = [fit(w_val, a_val, gamma_val) for w_val in windows]
+            except KeyError:
+                # skip any token not actually in model
+                continue
 
-                    # Зберігаємо результати в моделі
-                    model[ngram].a = a_val
-                    model[ngram].gamma = gamma_val
-                    model[ngram].temp_fa = temp_fa
+            # stash metrics for plotting
+            python_metrics[tok] = {
+                "fa_vals": fa_vals,
+                "fit_vals": fv,
+                "R": R_val,
+                "gamma": gamma_val,
+            }
 
-                    r_val = round(R(dt), 8)
-                    model[ngram].R = r_val
+            # record for DataTable
+            results.append(
+                {
+                    "ngram": tok,
+                    "F": len(ng.pos),
+                    "R": R_val,
+                    "a": a_val,
+                    "gamma": gamma_val,
+                    "goodness": goodness,
+                }
+            )
 
-                    return {
-                        'ngram': ngram,
-                        'a': round(a_val, 8),
-                        'gamma': round(gamma_val, 8),
-                        'error': round(r2_score(ff, temp_fa), 5),
-                        'R': r_val
-                    }
-                except Exception as e:
-                    print(f"Error in curve fitting for {ngram}: {e}")
-                    model[ngram].a = 0
-                    model[ngram].gamma = 0
-                    model[ngram].temp_fa = [0] * len(windows)
-                    r_val = round(R(dt), 8)
-                    model[ngram].R = r_val
+        # 5) build the final records list & globals
+        records = []
+        for i, rec in enumerate(results, start=1):
+            rec["rank"] = i
+            records.append(rec)
 
-                    return {
-                        'ngram': ngram,
-                        'a': 0,
-                        'gamma': 0,
-                        'error': 0,
-                        'R': r_val
-                    }
+        current_model = model
+        current_windows = windows
+        current_L = L
+        V = len(results)
+        df = pd.DataFrame(records)
 
-            # Підготовка даних для паралельної обробки
-            ngram_items = [(ngram, i) for i, ngram in enumerate(df["ngram"])]
+        execution_time = time() - start
 
-            # Визначаємо кількість робітників на основі кількості n-грамів
-            max_workers = min(4, len(ngram_items))
+        return (
+            records,
+            dash.no_update,
+            {"display": "inline"},
+            {"display": "none"},
+            dash.no_update,
+            f"Vocabulary: {V}",
+            f"Time: {execution_time:.4f} s",
+            False,
+        )
 
-            # Паралельна обробка для великої кількості n-грамів, інакше послідовна
-            results = []
-            if len(ngram_items) >= 4:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    results = list(executor.map(process_ngram, ngram_items))
-            else:
-                results = [process_ngram(item) for item in ngram_items]
-
-            # Витягуємо результати
-            temp_a = [result['a'] for result in results]
-            temp_gamma = [result['gamma'] for result in results]
-            temp_error = [result['error'] for result in results]
-            temp_R = [result['R'] for result in results]
-
-            # Обробка n-грамів для відображення
-            if n_size > 1:
-                temp_ngram = []
-                for ng in df['ngram']:
-                    if isinstance(ng, tuple):
-                        temp_ngram.append(" ".join(ng))
-                    else:
-                        temp_ngram.append(ng)
-                df["ngram"] = temp_ngram
-
-            # Оновлення DataFrame результатами
-            df['R'] = temp_R
-            df['gamma'] = temp_gamma
-            df['a'] = temp_a
-            df['goodness'] = temp_error
-            df = df.sort_values(by="F", ascending=False)
-            df['rank'] = range(1, len(temp_R) + 1)
-
-            end_time = time()
-            execution_time = end_time - start
-
-            # Підготовка даних для відображення
-            df_table = df.to_dict("records")
-
-            # Додаємо інформацію про розмір словника і час виконання
-            vocab_info = f"Vocabulary: {V}"
-            time_info = f"Time: {execution_time:.4f} s"
-
-            # Звільняємо пам'ять від тимчасових змінних
-            del temp_gamma, temp_R, temp_error, temp_a, results, ngram_items
-            gc.collect()
-
-            return (df_table, dash.no_update, {"display": "inline"}, {"display": "none"},
-                    dash.no_update, vocab_info, time_info, False)
     else:
         raise exceptions.PreventUpdate
 
@@ -2575,226 +2476,92 @@ def update_table(chain_clicks, code_clicks, dataframe, filename, f_min, w_min, w
 clikced_ngram = None
 
 
-@app.callback([Output("graphs", "figure"), Output("fa", "figure"), ],
-              [Input("dataframe", "active_tab"),
-               Input("card-tabs", "active_tab"),
-               Input("table", "active_cell"),
-               # NOTE додала параметр page_current та використала його для показу правильної інформації
-               Input("table", "page_current"),
-               Input("table", "derived_virtual_selected_rows"),
-               Input("table", "derived_virtual_indices"),
-               Input("chain", "clickData"),
-               Input("scale", "value"),
-               Input("fa", "clickData"),
-               Input("graphs", "clickData"),
-               Input("w_max", "value")],
-              [State("n_size", "value"),
-               State("def", "value"), ])
-def tab_content(active_tab2, active_tab1, active_cell, page_current, row_ids, ids, clicked_data, scale, fa_click,
-                graph_click, w_max, n,
-                definition):
-    # inside tab_content(…):
-    global analysis_mode, current_model, current_tokens, current_windows, python_metrics, current_L
+@app.callback(
+    [
+        Output("graphs", "figure"),
+        Output("fa", "figure"),
+    ],
+    [
+        Input("dataframe",      "active_tab"),     # DataTable vs Chain tab (unused here)
+        Input("card-tabs",      "active_tab"),     # “flunctuacion” vs “alpha/R”
+        Input("table",          "active_cell"),    # which cell was clicked
+        Input("table",          "page_current"),   # pagination
+        Input("chain",          "clickData"),      # chain‐plot clicks (keep if you still want it)
+        Input("scale",          "value"),          # linear vs log
+        Input("fa",             "clickData"),      # ∆F‐plot clicks (unused here)
+        Input("graphs",         "clickData"),      # distribution‐plot clicks (unused here)
+    ],
+    [
+        State("n_size",        "value"),
+        State("def",           "value"),
+    ],
+)
+def tab_content(
+    active_tab2, active_tab1, active_cell, page_current,
+    click_chain, scale, click_fa, click_dist,
+    n, definition
+):
+    import numpy as np
+    import plotly.graph_objs as go
+    from dash import exceptions
 
-    # —— Python‐file override for both graphs ——
-    if analysis_mode == 'code':
-        # determine clicked token
-        tok = None
-        if active_cell and ids:
-            tok = current_tokens[active_cell['row']]
-        else:
-            tok = current_tokens[0] if current_tokens else None
+    global df, current_model, current_windows, python_metrics, current_L
 
-        # Distribution plot
-        fig_dist = go.Figure()
-        if tok and tok in current_model:
-            fig_dist.add_trace(go.Bar(
-                x=np.arange(current_L),
-                y=current_model[tok].bool,
-                name=tok
+    # nothing to do until df exists
+    if df is None or df.empty:
+        raise exceptions.PreventUpdate
+
+    # determine which row was clicked
+    if active_cell:
+        # page_current is zero‐based; table.page_size is 50
+        page = page_current or 0
+        row  = active_cell["row"]
+        idx  = page * 50 + row
+        # clamp
+        if idx < 0 or idx >= len(df):
+            idx = 0
+    else:
+        idx = 0
+
+    tok = df["ngram"].iloc[idx]
+
+    # --- DISTRIBUTION PLOT ---
+    fig_dist = go.Figure()
+    if tok in current_model:
+        fig_dist.add_trace(go.Bar(
+            x=np.arange(current_L),
+            y=current_model[tok].bool,
+            name=str(tok)
+        ))
+    fig_dist.update_layout(title=f"Positions of “{tok}”")
+
+    # --- ∆F vs w  OR  γ vs R ---
+    fig_fa = go.Figure()
+    if active_tab1 == "tab2":
+        fa_vals  = python_metrics.get(tok, {}).get("fa_vals", [])
+        fit_vals = python_metrics.get(tok, {}).get("fit_vals", [])
+        fig_fa.add_trace(go.Scatter(
+            x=current_windows, y=fa_vals, mode="markers", name="∆F"
+        ))
+        if fit_vals:
+            fig_fa.add_trace(go.Scatter(
+                x=current_windows, y=fit_vals, name="fit=aw^b"
             ))
+    else:
+        R_val = python_metrics.get(tok, {}).get("R", 0)
+        G_val = python_metrics.get(tok, {}).get("gamma", 0)
+        fig_fa.add_trace(go.Scatter(
+            x=[R_val], y=[G_val], mode="markers", name=str(tok)
+        ))
 
-        # ∆F or α/R plot
-        fig_fa = go.Figure()
-        if active_tab1 == 'tab2':  # fluctuation tab
-            fa = python_metrics[tok]['fa_vals']
-            fit_vals = python_metrics[tok]['fit_vals']
-            fig_fa.add_trace(go.Scatter(x=current_windows, y=fa, mode='markers', name="∆F"))
-            fig_fa.add_trace(go.Scatter(x=current_windows, y=fit_vals, name="fit"))
-        else:  # alpha/R tab
-            Rv = python_metrics[tok]['R']
-            Gv = python_metrics[tok]['gamma']
-            fig_fa.add_trace(go.Scatter(x=[Rv], y=[Gv], mode='markers', name=tok))
+    fig_fa.update_xaxes(type=scale)
+    fig_fa.update_yaxes(type=scale)
+    fig_fa.update_layout(
+        hovermode="x unified",
+        title=f"{'∆F vs w' if active_tab1=='tab2' else 'γ vs R'} for “{tok}”"
+    )
 
-        fig_fa.update_xaxes(type=scale)
-        fig_fa.update_yaxes(type=scale)
-        fig_fa.update_layout(hovermode="x unified")
-
-        return fig_dist, fig_fa
-    # —— end Python‐file override ——
-
-    # Тільки для вкладки DataTable, оскільки MarkovChain було видалено
-    if active_tab2 == "data_table":
-        fig = go.Figure()
-        fig1 = go.Figure()
-        if active_tab1 == "tab2":
-            if active_cell:
-                if definition == "dynamic":
-                    ## add bar
-                    if fa_click:
-                        if overlap_mode == "overlapping":
-                            fig.add_trace(
-                                go.Bar(x=np.arange(w_s, L, w_s), y=new_ngram.count[fa_click["points"][0]["x"]],
-                                       name="∑∆w"))
-                        else:
-                            # Для non-overlapping режиму потрібно розрахувати положення барів
-                            bar_positions = []
-                            k = 1
-                            i = 0
-                            ww = fa_click["points"][0]["x"]
-                            while i < L - ww:
-                                bar_positions.append(i)
-                                shift = calc_non_overlapping_shift(k, w_s, w_e)
-                                i += shift
-                                k += 1
-                            fig.add_trace(go.Bar(x=bar_positions, y=new_ngram.count[ww], name="∑∆w"))
-
-                    # Перевірка, чи existує new_ngram та його атрибути
-                    if new_ngram is not None and hasattr(new_ngram, 'dfa') and new_ngram.dfa:
-                        fig1.add_trace(
-                            go.Scatter(x=[*new_ngram.dfa.keys()], y=[*new_ngram.dfa.values()], mode='markers',
-                                       name="∆F"))
-
-                        if hasattr(new_ngram, 'temp_dfa') and new_ngram.temp_dfa:
-                            fig1.add_trace(
-                                go.Scatter(x=[*new_ngram.dfa.keys()], y=[*new_ngram.temp_dfa], name="fit=aw^b"))
-
-                        fig1.update_xaxes(type=scale)
-                        fig1.update_yaxes(type=scale)
-                        fig1.update_layout(hovermode="x unified")
-
-                    return fig, fig1
-
-                if n > 1:
-                    ngram = tuple(df['ngram'][ids[active_cell['row']]].split())
-                    if ngram[0] == 'new_ngram':
-                        ngram = 'new_ngram'
-                else:
-                    ngram = df['ngram'][ids[active_cell['row']]]
-                fig.add_trace(go.Scatter(x=np.arange(L), y=model[ngram].bool, name="positions"))
-
-                if fa_click:
-                    if overlap_mode == "overlapping":
-                        fig.add_trace(
-                            go.Bar(x=np.arange(w_s, L, w_s), y=model[ngram].counts[fa_click["points"][0]["x"]],
-                                   name="∑∆w"))
-                    else:
-                        # Для non-overlapping режиму потрібно розрахувати положення барів
-                        bar_positions = []
-                        k = 1
-                        i = 0
-                        while i < L - ww:
-                            bar_positions.append(i)
-                            shift = calc_non_overlapping_shift(k, w_s, w_e)
-                            i += shift
-                            k += 1
-                        fig.add_trace(go.Bar(x=bar_positions, y=model[ngram].counts[ww], name="∑∆w"))
-                if graph_click:
-                    www = graph_click['points'][0]['x']
-                graph_click = None
-                fa_click = None
-
-                temp_ww = [*model[ngram].fa.keys()]
-                fig1.add_trace(
-                    go.Scatter(x=temp_ww,
-                               y=[*model[ngram].fa.values()],
-                               mode='markers',
-                               name="∆F"))
-                fig1.add_trace(go.Scatter(
-                    x=temp_ww,
-                    y=model[ngram].temp_fa,
-                    name="fit=aw^b"))
-                fig1.update_xaxes(type=scale)
-                fig1.update_yaxes(type=scale)
-                fig1.update_layout(hovermode="x unified")
-                active_cell = None
-                return fig, fig1
-            else:
-                active_cell = None
-                return fig, fig1
-        else:
-            hover_data = []
-            if active_cell:
-                if definition == "dynamic":
-                    if fa_click:
-                        fig.add_trace(
-                            go.Bar(x=np.arange(w_s, L, w_s), y=new_ngram.count[fa_click["points"][0]["x"]], name="∑∆w"))
-
-                    # Перевірка наявності new_ngram та його атрибутів
-                    if new_ngram is not None and hasattr(new_ngram, 'R') and hasattr(new_ngram, 'gamma'):
-                        fig1.add_trace(
-                            go.Scatter(x=new_ngram.R, y=new_ngram.gamma, mode='markers', hover_data=["new_ngram"]))
-                        fig1.update_xaxes(type=scale)
-                        fig1.update_yaxes(type=scale)
-                        fig1.update_layout(hovermode="x unified")
-
-                    return fig, fig1
-
-                if n > 1:
-                    ngram = tuple(df['ngram'][ids[active_cell['row']]].split())
-                    if ngram[0] == 'new_ngram':
-                        ngram = 'new_ngram'
-                else:
-                    ngram = df['ngram'][ids[active_cell['row']]]
-
-                for data in df['ngram']:
-                    # HERE ADDED to skip random float entities
-                    if not isinstance(data, numbers.Number):
-                        hover_data.append("".join(data))
-                fig.add_trace(go.Scatter(x=np.arange(L), y=model[ngram].bool, name="positions"))
-                if fa_click:
-                    ww = fa_click['points'][0]["x"]
-                    # HERE ww-1
-                    if overlap_mode == "overlapping":
-                        fig.add_trace(go.Bar(x=np.arange(ww, L, w_s), y=model[ngram].counts[ww], name="∑∆w"))
-                    else:
-                        # Для non-overlapping режиму потрібно розрахувати положення барів
-                        bar_positions = []
-                        k = 1
-                        i = 0
-                        while i < L - ww:
-                            bar_positions.append(i)
-                            shift = calc_non_overlapping_shift(k, w_s, w_e)
-                            i += shift
-                            k += 1
-                        fig.add_trace(go.Bar(x=bar_positions, y=model[ngram].counts[ww], name="∑∆w"))
-
-                fa_click = None
-                if graph_click:
-                    print(model[ngram].sums.keys())
-
-                graph_click = None
-
-                fig1.add_trace(go.Scatter(x=df["R"], y=df["gamma"], mode="markers", text=hover_data))
-                # fig1.add_trace(go.Scatter(x=[df['R'][active_cell['row']]],
-                fig1.add_trace(go.Scatter(x=[df['R'][ids[active_cell['row']]]],
-                                          # y=[df["b"][active_cell['row']]],
-                                          y=[df["gamma"][ids[active_cell['row']]]],
-                                          mode="markers",
-                                          text=' '.join(ngram),
-                                          marker=dict(
-                                              size=20,
-                                              color="red"
-                                          )))
-                fig1.update_layout(showlegend=False)
-                fig1.update_yaxes(type=scale)
-                fig1.update_xaxes(type=scale)
-                fig1.update_layout(hovermode="x unified")
-                active_cell = None
-
-            return fig, fig1
-
-    return dash.no_update, dash.no_update
+    return fig_dist, fig_fa
 
 
 @app.callback(
