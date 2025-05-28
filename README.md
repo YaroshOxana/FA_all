@@ -97,3 +97,24 @@ For each analysis, the application calculates:
 - Statistical parameters for text characterization
 
 Results can be exported to Excel files for further analysis and comparison. 
+
+## What was causing the graph's discrepancy?
+
+**Click → Graph mapping**
+
+- **Problem:** we were indexing the original DataFrame (`df.iloc[page*PAGE_SIZE + row]`), so sorting or paging didn’t change which row we picked.
+- **Solution:** add `derived_virtual_data` and `derived_virtual_indices` as callback inputs and then:
+
+  ```python
+  ddata    = derived_virtual_data or []
+  dindices = derived_virtual_indices or []
+  offset   = page*PAGE_SIZE + active_cell["row"]
+
+  if offset < len(ddata):
+      tok = ddata[offset]["ngram"]
+  elif offset < len(dindices):
+      tok = df["ngram"].iloc[dindices[offset]]
+  else:
+      tok = df["ngram"].iat[0]
+  
+That change alone eliminates **both** the sorting bug and the pagination bug.

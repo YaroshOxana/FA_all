@@ -2486,6 +2486,8 @@ clikced_ngram = None
         Input("card-tabs",      "active_tab"),     # “flunctuacion” vs “alpha/R”
         Input("table",          "active_cell"),    # which cell was clicked
         Input("table",          "page_current"),   # pagination
+        Input("table",           "derived_virtual_data"),
+        Input("table",           "derived_virtual_indices"),
         Input("chain",          "clickData"),      # chain‐plot clicks (keep if you still want it)
         Input("scale",          "value"),          # linear vs log
         Input("fa",             "clickData"),      # ∆F‐plot clicks (unused here)
@@ -2496,11 +2498,10 @@ clikced_ngram = None
         State("def",           "value"),
     ],
 )
-def tab_content(
-    active_tab2, active_tab1, active_cell, page_current,
-    click_chain, scale, click_fa, click_dist,
-    n, definition
-):
+def tab_content(active_tab2, active_tab1, active_cell, page_current,
+                derived_virtual_data, derived_virtual_indices,
+                click_chain, scale, click_fa, click_dist,
+                n, definition):
     import numpy as np
     import plotly.graph_objs as go
     from dash import exceptions
@@ -2511,19 +2512,30 @@ def tab_content(
     if df is None or df.empty:
         raise exceptions.PreventUpdate
 
-    # determine which row was clicked
-    if active_cell:
-        # page_current is zero‐based; table.page_size is 50
-        page = page_current or 0
-        row  = active_cell["row"]
-        idx  = page * 50 + row
-        # clamp
-        if idx < 0 or idx >= len(df):
-            idx = 0
-    else:
-        idx = 0
+    # how many rows per page your table uses:
+    PAGE_SIZE = 50
 
-    tok = df["ngram"].iloc[idx]
+    # grab the sorted/filtered rows and (optionally) their original indices
+    ddata = derived_virtual_data or []
+    dindices = derived_virtual_indices or []
+
+    if active_cell:
+        page = page_current or 0
+        row = active_cell["row"] or 0
+        offset = page * PAGE_SIZE + row
+
+        if offset < len(ddata):
+            # best: pull the token straight from the displayed row
+            tok = ddata[offset]["ngram"]
+        elif offset < len(dindices):
+            # fallback: map back into your original df
+            orig_idx = dindices[offset]
+            tok = df["ngram"].iloc[orig_idx]
+        else:
+            # ultimate fallback
+            tok = df["ngram"].iat[0]
+    else:
+        tok = df["ngram"].iat[0]
 
     # --- DISTRIBUTION PLOT ---
     fig_dist = go.Figure()
@@ -2560,8 +2572,8 @@ def tab_content(
         hovermode="x unified",
         title=f"{'∆F vs w' if active_tab1=='tab2' else 'γ vs R'} for “{tok}”"
     )
-
     return fig_dist, fig_fa
+
 
 
 @app.callback(
