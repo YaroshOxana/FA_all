@@ -178,6 +178,28 @@ def tokenize_mixed_content(text: str, filename: str) -> List[str]:
 
     return tokens
 
+import os
+import pandas as pd
+
+def save_token_to_excel(filename: str, tok: str):
+    # make sure the folder exists
+    out_dir = "saved_data"
+    os.makedirs(out_dir, exist_ok=True)
+
+    met = python_metrics.get(tok, {})
+    df_fluc = pd.DataFrame({
+        "w": current_windows,
+        "∆F":    met.get("fa_vals", []),
+        "fit":   met.get("fit_vals", [])
+    })
+
+    base, _ = os.path.splitext(filename)
+    fn = f"{base}_{tok}.xlsx"
+    out_path = get_unique_path(os.path.join(out_dir, fn))
+
+    with pd.ExcelWriter(out_path) as writer:
+        df_fluc.to_excel(writer, sheet_name="fluctuation",  index=False)
+
 def get_unique_path(path: str) -> str:
     """
     If `path` exists, append (1), (2), … before the extension until it's unique.
@@ -1017,7 +1039,7 @@ layout1 = html.Div([
                                                     {"label": "periodic", "value": "periodic"},
                                                     {"label": "ordinary", "value": "ordinary"}
                                                 ],
-                                                value="no",
+                                                value="periodic",
                                                 style={"font-weight": "bold"}
                                             ),
                                             dbc.InputGroupText("Boundary Condition:")
@@ -1418,8 +1440,8 @@ layout1 = html.Div([
                         dbc.CardHeader(
                             dbc.Tabs(
                                 [
-                                    dbc.Tab(label="flunctuacion", tab_id="tab2", label_style={"font-weight": "bold"}),
-                                    dbc.Tab(label="alpha/R", tab_id="tab3", label_style={"font-weight": "bold"})
+                                    dbc.Tab(label="fluctuacion", tab_id="tab2", label_style={"font-weight": "bold"}),
+                                    dbc.Tab(label="gamma/R", tab_id="tab3", label_style={"font-weight": "bold"})
                                 ],
                                 id='card-tabs',
                                 active_tab="tab2"
@@ -2476,35 +2498,46 @@ def update_table(
 clikced_ngram = None
 
 
+from dash import exceptions
+import numpy as np
+import plotly.graph_objs as go
+
+PAGE_SIZE = 50  # adjust if your table.page_size ever changes
+
+from dash import exceptions
+import numpy as np
+import plotly.graph_objs as go
+
+PAGE_SIZE = 50  # match your DataTable page_size
+
+from dash import exceptions
+import numpy as np
+import plotly.graph_objs as go
+
+PAGE_SIZE = 50  # match your DataTable page_size
+
 @app.callback(
-    [
-        Output("graphs", "figure"),
-        Output("fa", "figure"),
-    ],
-    [
-        Input("dataframe",      "active_tab"),     # DataTable vs Chain tab (unused here)
-        Input("card-tabs",      "active_tab"),     # “flunctuacion” vs “alpha/R”
-        Input("table",          "active_cell"),    # which cell was clicked
-        Input("table",          "page_current"),   # pagination
-        Input("table",           "derived_virtual_data"),
-        Input("table",           "derived_virtual_indices"),
-        Input("chain",          "clickData"),      # chain‐plot clicks (keep if you still want it)
-        Input("scale",          "value"),          # linear vs log
-        Input("fa",             "clickData"),      # ∆F‐plot clicks (unused here)
-        Input("graphs",         "clickData"),      # distribution‐plot clicks (unused here)
-    ],
-    [
-        State("n_size",        "value"),
-        State("def",           "value"),
-    ],
+    [Output("graphs", "figure"),
+     Output("fa",     "figure")],
+    [Input("dataframe",            "active_tab"),
+     Input("card-tabs",            "active_tab"),
+     Input("table",                "active_cell"),
+     Input("table",                "page_current"),
+     Input("table",                "derived_virtual_data"),
+     Input("table",                "derived_virtual_indices"),
+     Input("chain",                "clickData"),
+     Input("scale",                "value"),
+     Input("fa",                   "clickData"),
+     Input("graphs",               "clickData"),
+     Input("w_max",                "value")],
+    [State("n_size", "value"),
+     State("def", "value"),
+     State("file-selector", "value")]
 )
 def tab_content(active_tab2, active_tab1, active_cell, page_current,
                 derived_virtual_data, derived_virtual_indices,
-                click_chain, scale, click_fa, click_dist,
-                n, definition):
-    import numpy as np
-    import plotly.graph_objs as go
-    from dash import exceptions
+                click_chain, scale, fa_click, click_dist, w_max,
+                n, definition, selected_file):
 
     global df, current_model, current_windows, python_metrics, current_L
 
@@ -2512,66 +2545,111 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current,
     if df is None or df.empty:
         raise exceptions.PreventUpdate
 
-    # how many rows per page your table uses:
-    PAGE_SIZE = 50
-
-    # grab the sorted/filtered rows and (optionally) their original indices
-    ddata = derived_virtual_data or []
+    # — determine which token was clicked —
+    ddata    = derived_virtual_data   or []
     dindices = derived_virtual_indices or []
 
     if active_cell:
-        page = page_current or 0
-        row = active_cell["row"] or 0
+        page   = page_current or 0
+        row    = active_cell["row"] or 0
         offset = page * PAGE_SIZE + row
 
         if offset < len(ddata):
-            # best: pull the token straight from the displayed row
-            tok = ddata[offset]["ngram"]
+            tok = ddata[offset].get("ngram")
         elif offset < len(dindices):
-            # fallback: map back into your original df
-            orig_idx = dindices[offset]
-            tok = df["ngram"].iloc[orig_idx]
+            orig = dindices[offset]
+            tok  = df["ngram"].iat[orig]
         else:
-            # ultimate fallback
             tok = df["ngram"].iat[0]
     else:
         tok = df["ngram"].iat[0]
 
-    # --- DISTRIBUTION PLOT ---
+    # — DISTRIBUTION PLOT —
+    x = np.arange(current_L)
+    x_min, x_max = x.min(), x.max()
+    span = x_max - x_min or 1
+
+    # pick a fraction of the span (0.005 == 0.5%)
+    fraction = 0.005
+    bar_width = span * fraction
+
     fig_dist = go.Figure()
     if tok in current_model:
         fig_dist.add_trace(go.Bar(
-            x=np.arange(current_L),
+            x=x,
             y=current_model[tok].bool,
-            name=str(tok)
+            name=str(tok),
+            width=bar_width,  # ← dynamic
+            marker={"line": {"width": 1.5}}
         ))
-    fig_dist.update_layout(title=f"Positions of “{tok}”")
 
-    # --- ∆F vs w  OR  γ vs R ---
+    fig_dist.update_layout(
+        title=f"Positions of “{tok}”",
+        bargap=0
+    )
+
+    # — ∆F vs w   OR   γ vs R —
     fig_fa = go.Figure()
+
     if active_tab1 == "tab2":
+        # fluctuation‐versus‐window
         fa_vals  = python_metrics.get(tok, {}).get("fa_vals", [])
         fit_vals = python_metrics.get(tok, {}).get("fit_vals", [])
         fig_fa.add_trace(go.Scatter(
-            x=current_windows, y=fa_vals, mode="markers", name="∆F"
+            x=current_windows, y=fa_vals,
+            mode="markers", name="∆F"
         ))
         if fit_vals:
             fig_fa.add_trace(go.Scatter(
-                x=current_windows, y=fit_vals, name="fit=aw^b"
+                x=current_windows, y=fit_vals,
+                name="fit=aw^b"
             ))
+        title = f"∆F vs w for “{tok}”"
+
     else:
-        R_val = python_metrics.get(tok, {}).get("R", 0)
-        G_val = python_metrics.get(tok, {}).get("gamma", 0)
+        # build full cloud of (R,γ) with hover labels
+        xs, ys, labels = [], [], []
+        for t, m in python_metrics.items():
+            Rv = m.get("R", None)
+            Gv = m.get("gamma", None)
+            if Rv is not None and Gv is not None:
+                xs.append(Rv)
+                ys.append(Gv)
+                labels.append(t)
+
         fig_fa.add_trace(go.Scatter(
-            x=[R_val], y=[G_val], mode="markers", name=str(tok)
+            x=xs, y=ys,
+            mode="markers",
+            name="all tokens",
+            marker={"opacity": 0.5, "size": 8},
+            text=labels,
+            hovertemplate="%{text}<br>R: %{x:.3f}<br>γ: %{y:.3f}<extra></extra>"
         ))
 
+        # overlay selected in red
+        R_sel = python_metrics.get(tok, {}).get("R", None)
+        G_sel = python_metrics.get(tok, {}).get("gamma", None)
+        if R_sel is not None and G_sel is not None:
+            fig_fa.add_trace(go.Scatter(
+                x=[R_sel], y=[G_sel],
+                mode="markers",
+                name=str(tok),
+                marker={"color": "red", "size": 12, "line": {"width": 2, "color": "darkred"}},
+                text=[tok],
+                hovertemplate="%{text}<br>R: %{x:.3f}<br>γ: %{y:.3f}<extra></extra>"
+            ))
+
+        title = f"γ vs R for “{tok}”"
+
+    fig_fa.update_layout(
+        title=title,
+        hovermode="closest"
+    )
     fig_fa.update_xaxes(type=scale)
     fig_fa.update_yaxes(type=scale)
-    fig_fa.update_layout(
-        hovermode="x unified",
-        title=f"{'∆F vs w' if active_tab1=='tab2' else 'γ vs R'} for “{tok}”"
-    )
+    if selected_file:
+        save_token_to_excel(selected_file, tok)
+
     return fig_dist, fig_fa
 
 
