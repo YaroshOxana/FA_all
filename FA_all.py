@@ -1440,7 +1440,7 @@ layout1 = html.Div([
                         dbc.CardHeader(
                             dbc.Tabs(
                                 [
-                                    dbc.Tab(label="fluctuacion", tab_id="tab2", label_style={"font-weight": "bold"}),
+                                    dbc.Tab(label="fluctuation", tab_id="tab2", label_style={"font-weight": "bold"}),
                                     dbc.Tab(label="gamma/R", tab_id="tab3", label_style={"font-weight": "bold"})
                                 ],
                                 id='card-tabs',
@@ -2675,6 +2675,14 @@ def tab_content(active_tab2, active_tab1, active_cell, page_current,
 def save(n_clicks, active_cell, page_current, ids,
          filename, n_size, w_min, w_s, w_e, w_max,
          fmin, condition, definition, min_dist_option, overlap_mode):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise exceptions.PreventUpdate
+    # only proceed when the save‐button caused this
+    trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+    if trigger != "save":
+        raise exceptions.PreventUpdate
+
     if n_clicks is None:
         return dash.no_update
     if not filename:
